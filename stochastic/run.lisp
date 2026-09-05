@@ -27,6 +27,9 @@
       (rose-node-cost node)
       (funcall cost-fn node)))
 
+(defconstant +inf-cost+ 100000000)
+(deftype cost () `(integer 0 ,+inf-cost+))
+
 (defun compute-rule-set-lambda (cost-fn rules)
   (let* ((pat-rows (mapcar (lambda (rule)
                              (destructuring-bind (lhs rhs &key (guard t)) rule
@@ -42,40 +45,37 @@
                                         (yield-rewrite (cost #',cost-fn candidate) candidate))))))))
                            rules))
          (body (expand-match (list 'subject) pat-rows)))
-    `(term-rewrite-cost
+    `(compute-weights
       (lambda (subject node cost beta-constant)
-        (declare (rose-node node)
-                 (fixnum cost beta-constant)
-                 (optimize speed (safety 0)))
+        (declare (optimize speed)
+                 (rose-node node) (cost cost) (fixnum beta-constant))
         (macrolet ((yield-rewrite (cost-expr constructor)
                      (declare (ignore constructor))
-                     `(progn
+                     `(locally (declare (optimize (safety 0)))
                         (incf (rose-node-n-rewrites node))
                         (incf (rose-node-weight node)
                               (fastexp2 (- cost ,cost-expr) beta-constant)))))
           ,@body))
-      term-rewrite-inf-temp
+      sample-inf-temp
       (lambda (subject context n-rewrites)
-        (declare (function context)
-                 (fixnum n-rewrites)
-                 (optimize speed (safety 0)))
+        (declare (optimize speed)
+                 (function context) (fixnum n-rewrites))
         (macrolet ((yield-rewrite (cost-expr constructor)
                      (declare (ignore cost-expr))
-                     `(progn
+                     `(locally (declare (optimize (safety 0)))
                         (decf n-rewrites)
                         (when (minusp n-rewrites)
                           (setq *node* (funcall context ,constructor))
                           (throw 'sample nil)))))
           ,@body)
         n-rewrites)
-      term-rewrite-fin-temp
+      sample-fin-temp
       (lambda (subject context weight cost beta-constant)
-        (declare (function context)
-                 (single-float weight)
-                 (fixnum cost beta-constant)
-                 (optimize speed (safety 0)))
+        (declare (optimize speed)
+                 (function context) (single-float weight)
+                 (cost cost) (fixnum beta-constant))
         (macrolet ((yield-rewrite (cost-expr constructor)
-                     `(progn
+                     `(locally (declare (optimize (safety 0)))
                         (decf weight (fastexp2 (- cost ,cost-expr) beta-constant))
                         (when (minusp weight)
                           (setq *node* (funcall context ,constructor))
@@ -136,22 +136,21 @@
                       (incf (gethash tmpl coefficients 0)))
                      (t (incf secant (default-case cases))))))
       (process tmpl)
-      `(the non-negative-fixnum
-            (+ ,secant
-               ,@(serapeum:collecting
-                   (maphash (lambda (var c)
-                              (collect `(the non-negative-fixnum
-                                             (* ,c (if (rose-node-p ,var)
-                                                       (rose-node-cost ,var)
-                                                       ,(default-case cases))))))
-                            coefficients)))))))
+      `(+ ,secant
+          ,@(serapeum:collecting
+              (maphash (lambda (var c)
+                         (collect `(the cost
+                                        (* ,c (if (rose-node-p ,var)
+                                                  (rose-node-cost ,var)
+                                                  ,(default-case cases))))))
+                       coefficients))))))
 
 (defmacro define-tree-sum-cost (name &rest cases)
   `(progn
      (defun ,name (node)
        (if (rose-node-p node)
            (let ((sum (case (rose-node-fsym node) ,@cases)))
-             (declare (fixnum sum))
+             (declare (cost sum))
              (do-rose-node-args (arg node)
                (incf sum (if (rose-node-p arg)
                              (rose-node-cost arg)
@@ -162,16 +161,15 @@
        (setf (get ',name 'expand-cost-fn)
              (lambda (tmpl) (expand-tree-sum-cost tmpl ',cases))))))
 
-(defun recompute-rose (node cost-fns cost-fn beta-constant)
+(defun recompute-rose (node compute-weights cost-fn beta-constant)
   (declare (optimize speed (safety 0))
-           ((function (t) fixnum) cost-fn))
+           ((function (t) cost) cost-fn)
+           ((function (rose-node rose-node cost fixnum) t) compute-weights))
   (labels ((process (node)
              (declare (rose-node node))
              (flet ((consider-rewrites (subject)
-                      (let ((cost (cost cost-fn subject)))
-                        (dolist (fn cost-fns)
-                          (declare (function fn))
-                          (funcall fn subject node cost beta-constant)))))
+                      (funcall compute-weights subject node
+                               (cost cost-fn subject) beta-constant)))
                (setf (rose-node-n-rewrites node) 0)
                (do-rose-node-args (arg node)
                  (if (rose-node-p arg)
@@ -191,29 +189,27 @@
 ;; PROXY-COST-FN is still needed because SEARCH-ROSE-N-REWRITES need
 ;; to construct new nodes along the spine, whose cost need to be
 ;; computed
-(defun sample-rewrite-inf-temp (inf-fns proxy-cost-fn)
+(defun sample-rewrite-inf-temp (sample-fn proxy-cost-fn)
   (declare (optimize speed)
-           ((function (t) fixnum) proxy-cost-fn))
+           ((function (t) cost) proxy-cost-fn)
+           ((function (t function fixnum) fixnum) sample-fn))
   (catch 'sample
     (multiple-value-bind (subject context n-rewrites)
         (search-rose-n-rewrites *node* (random (rose-node-n-rewrites *node*)) proxy-cost-fn)
       (declare (fixnum n-rewrites))
       ;; rewrites for this rose node
-      (dolist (fn inf-fns)
-        (declare (function fn))
-        (setq n-rewrites (funcall fn subject context n-rewrites)))
+      (setq n-rewrites (funcall sample-fn subject context n-rewrites))
       ;; rewrites for constant symbol children
       (do-rose-node-args ((arg i) subject)
         (unless (rose-node-p arg)
           (klet ((context (candidate)
                    (funcall context (node-replace-arg subject i candidate proxy-cost-fn))))
-            (dolist (fn inf-fns)
-              (declare (function fn))
-              (setq n-rewrites (funcall fn arg #'context n-rewrites)))))))))
+            (setq n-rewrites (funcall sample-fn arg #'context n-rewrites))))))))
 
-(defun sample-rewrite-fin-temp (fin-fns proxy-cost-fn beta-constant)
+(defun sample-rewrite-fin-temp (sample-fn proxy-cost-fn beta-constant)
   (declare (optimize speed)
-           ((function (t) fixnum) proxy-cost-fn)
+           ((function (t) cost) proxy-cost-fn)
+           ((function (t function single-float cost fixnum) single-float) sample-fn)
            (fixnum beta-constant))
   (catch 'sample
     (multiple-value-bind (subject context weight)
@@ -221,37 +217,32 @@
       (declare (single-float weight))
       ;; rewrites for this rose node
       (let ((cost-1 (cost proxy-cost-fn subject)))
-        (dolist (fn fin-fns)
-          (declare (function fn))
-          (setq weight (funcall fn subject context weight cost-1 beta-constant))))
+        (setq weight (funcall sample-fn subject context weight cost-1 beta-constant)))
       ;; rewrites for constant symbol children
       (do-rose-node-args ((arg i) subject)
         (unless (rose-node-p arg)
           (klet ((context (candidate)
                    (funcall context (node-replace-arg subject i candidate proxy-cost-fn))))
             (let ((cost-1 (cost proxy-cost-fn arg)))
-              (dolist (fn fin-fns)
-                (declare (function fn))
-                (setq weight (funcall fn arg #'context weight cost-1 beta-constant))))))))))
+              (setq weight (funcall sample-fn arg #'context weight cost-1 beta-constant)))))))))
 
 (defun stochastic-search-1
-    (term rule-sets cost-fn
+    (term rule-set cost-fn
      &key (finish-flag (list nil)) (seed 0) (stride 1)
        (beta 2.0) (inf-temp-period 100) (inf-temp-iters 3)
        (max-stall 16000) (max-restart 64)
-       (target-cost 0) max-time (inf-cost 100000000)
+       (target-cost 0) max-time
        (proxy-cost-fn cost-fn)
        verbose)
   (declare ((or null fixnum) inf-temp-period)
            ((or null fixnum) inf-temp-iters)
            (single-float beta))
-  (let* ((end-time (and max-time
+  (bind ((end-time (and max-time
                         (+ (get-internal-real-time)
                            (* max-time internal-time-units-per-second))))
-         (compiled-rule-sets (mapcar (rcurry #'compiled-rule-set cost-fn) (ensure-list rule-sets)))
-         (cost-fns (mapcar (rcurry #'getf 'term-rewrite-cost) compiled-rule-sets))
-         (inf-fns (mapcar (rcurry #'getf 'term-rewrite-inf-temp) compiled-rule-sets))
-         (fin-fns (mapcar (rcurry #'getf 'term-rewrite-fin-temp) compiled-rule-sets))
+         ((compute-weights sample-inf-temp sample-fin-temp)
+          (mapcar (curry #'getf (compiled-rule-set rule-set proxy-cost-fn))
+                  '(compute-weights sample-inf-temp sample-fin-temp)))
          (cost-fn (ensure-function cost-fn))
          (proxy-cost-fn (ensure-function proxy-cost-fn))
          (beta-constant (constant-for-fastexp2 (exp (/ beta 2))))
@@ -261,7 +252,7 @@
          (best-cost init-cost)
          (n-accepted 0)
          (n-restart 0))
-    (declare ((function (t) fixnum) cost-fn proxy-cost-fn))
+    (declare ((function (t) cost) cost-fn proxy-cost-fn))
     (float-features:with-float-traps-masked t
       ;; Outer loop: restart with different seeds
       (block solve
@@ -280,7 +271,7 @@
                           ;; GET-INTERNAL-REAL-TIME is slow
                           (and end-time (zerop (mod i 1024)) (>= (get-internal-real-time) end-time)))
                   (return-from solve))
-                (recompute-rose *node* cost-fns proxy-cost-fn beta-constant)
+                (recompute-rose *node* compute-weights proxy-cost-fn beta-constant)
 
                 ;; FIXME: a constant top-level *node* might still be rewritable,
                 ;; although this probably is not usually useful.
@@ -291,8 +282,8 @@
                 (if (and inf-temp-period inf-temp-iters
                          (< (mod i inf-temp-period)
                             inf-temp-iters))
-                    (sample-rewrite-inf-temp inf-fns proxy-cost-fn)
-                    (sample-rewrite-fin-temp fin-fns proxy-cost-fn beta-constant))
+                    (sample-rewrite-inf-temp sample-inf-temp proxy-cost-fn)
+                    (sample-rewrite-fin-temp sample-fin-temp proxy-cost-fn beta-constant))
 
                 (incf n-accepted)
                 (let ((cost (funcall cost-fn *node*)))
@@ -313,7 +304,7 @@
                       (incf n-stall))
                   ;; Check for restart
                   (unless (and (< n-stall max-stall)
-                               (< cost inf-cost))
+                               (< cost +inf-cost+))
                     (when verbose
                       (format t "~&Iteration ~a/~a restart ~a ~a~%"
                               seed i cost (node-term *node*)))
@@ -338,18 +329,17 @@
       (terpri)
       (finish-output))))
 
-(defun stochastic-search (term rule-sets cost-fn &rest args
+(defun stochastic-search (term rule-set cost-fn &rest args
                           &key (seed 0) (stride 1)
                             (beta 2.0) (inf-temp-period 100) (inf-temp-iters 3)
                             (max-stall 16000) (max-restart 64)
-                            (target-cost 0) max-time (inf-cost 100000000)
+                            (target-cost 0) max-time
                             (proxy-cost-fn cost-fn)
                             verbose
                             (nproc 1) workers)
   (declare (ignore beta inf-temp-period inf-temp-iters
                    max-stall max-restart
                    target-cost max-time
-                   proxy-cost-fn
                    verbose))
   (cond (workers
          (let ((n-workers (length workers)))
@@ -359,7 +349,7 @@
                    for nproc-1 = (if (< i rem) (1+ nproc) nproc)
                    do (with-standard-io-syntax
                         (write `(apply #'stochastic-search
-                                       ',term ',rule-sets ',cost-fn
+                                       ',term ',rule-set ',cost-fn
                                        :seed ',(+ seed (* i stride))
                                        :stride ',(* n-workers stride)
                                        :nproc ',nproc-1
@@ -377,13 +367,13 @@
                           (:error (error "Error in worker: ~a" (cadr result))))))))))
         ((> nproc 1)
          ;; Compile rule sets in main thread only
-         (mapc (rcurry #'compiled-rule-set cost-fn) rule-sets)
+         (compiled-rule-set rule-set proxy-cost-fn)
          (let* ((finish-flag (list nil))
                 (threads (mapcar (lambda (i)
                                    (bt:make-thread
                                     (lambda ()
                                       (multiple-value-list
-                                       (apply #'stochastic-search-1 term rule-sets cost-fn
+                                       (apply #'stochastic-search-1 term rule-set cost-fn
                                               :seed (+ seed (* i stride))
                                               :stride (* nproc stride)
                                               :finish-flag finish-flag
@@ -393,7 +383,7 @@
            (unwind-protect
                 (values-list (reduce #'reduce-stochastic-result threads :key #'bt:join-thread))
              (setf (car finish-flag) t))))
-        ((= nproc 0) (values (1+ inf-cost) term (list :n-accepted 0 :n-restart 0)))
+        ((= nproc 0) (values +inf-cost+ term (list :n-accepted 0 :n-restart 0)))
         (t (apply #'stochastic-search-1
-                  term rule-sets cost-fn
+                  term rule-set cost-fn
                   (remove-from-plist args :nproc :workers)))))

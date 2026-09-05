@@ -92,7 +92,7 @@ everything else and bind ?VAR."
                 (subst-row var (car pat-row) (cdr pat-row)))
               bind-rows))
      (when (or node-clauses atom-clauses)
-       `((if (vectorp ,var)
+       `((if (rose-node-p ,var)
              (case/bind (rose-node-fsym ,var) ,@node-clauses)
              (case/bind ,var ,@atom-clauses)))))))
 
@@ -112,8 +112,8 @@ everything else and bind ?VAR."
 
 (defun node-equal (x y)
   (cond
-    ((and (not (vectorp x)) (not (vectorp y))) (eql x y))
-    ((and (vectorp x) (vectorp y))
+    ((and (not (rose-node-p x)) (not (rose-node-p y))) (eql x y))
+    ((and (rose-node-p x) (rose-node-p y))
      (unless (= (length x) (length y))
        (return-from node-equal nil))
      (loop for i from (1- +rose-node-args-offset+) below (length x)

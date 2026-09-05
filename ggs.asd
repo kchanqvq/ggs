@@ -34,6 +34,7 @@
   :depends-on (:alexandria
                :serapeum
                :ggs/common
+               :metabang-bind
                :float-features
                :bordeaux-threads)
   :components ((:file "package")

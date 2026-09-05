@@ -127,8 +127,9 @@ CLASSES and FSYM-TABLE are only up-to-date after `egraph-rebuild'."
 
 (defun make-analysis-data (eclass-info enode)
   (let ((analysis-info-list (egraph-analysis-info-list *egraph*)))
-    (do-eclass-info-data (datum eclass-info)
-      (setq datum (funcall (analysis-info-make (pop analysis-info-list)) enode)))))
+    (do-eclass-info-data ((datum i) eclass-info)
+      (setf (eclass-info-datum i eclass-info)
+            (funcall (analysis-info-make (pop analysis-info-list)) enode)))))
 
 (defun merge-analysis-data (eclass new-class-info)
   (let* ((data-changed nil)
@@ -158,8 +159,8 @@ CLASSES and FSYM-TABLE are only up-to-date after `egraph-rebuild'."
 
 (-> intern-enode (enode) enode)
 (defun intern-enode (key-node)
-  (do-enode-args (arg key-node)
-    (setq arg (enode-find arg)))
+  (do-enode-args ((arg i) key-node)
+    (setf (enode-arg i key-node) (enode-find arg)))
   (let ((hc (egraph-hash-cons *egraph*))
         (hash (term-hash key-node)))
     (setf (enode-hash-code key-node) hash)
