@@ -9,8 +9,6 @@
   (fsym)
   (arg))
 
-(defvar *node*)
-
 (defun term-node (term cost-fn)
   (labels ((process (term)
              (if (consp term)
@@ -45,16 +43,18 @@
     (setf (rose-node-cost new-node) (funcall cost-fn new-node))
     new-node))
 
-(defmacro def-search-rose (name accessor type)
+(defmacro def-search-rewrite (name accessor type)
   `(progn
-     (declaim (ftype (function (rose-node ,type (function (t) fixnum))
-                               (values rose-node function ,type))
+     ;; A rule's RHS can be a constant, so REWRITE-FN -- and hence this
+     ;; function -- may return a non-ROSE-NODE.
+     (declaim (ftype (function ( rose-node ,type (function (t) fixnum)
+                                 (function (t ,type) t))
+                               t)
                      ,name))
-     (defun ,name (node value cost-fn)
-       (labels ((process (node context value)
+     (defun ,name (node value cost-fn rewrite-fn)
+       (labels ((process (node value)
                   (declare (optimize speed)
                            (rose-node node)
-                           (function context)
                            (,type value))
                   (do-rose-node-args ((arg i) node)
                     (when (rose-node-p arg)
@@ -62,12 +62,10 @@
                         (if (<= a-value value)
                             (decf value a-value)
                             (return-from process
-                              (process arg
-                                       (lambda (node-1)
-                                         (funcall context (node-replace-arg node i node-1 cost-fn)))
-                                       value))))))
-                  (return-from process (values node context value))))
-         (process node #'identity value)))))
+                              (node-replace-arg node i (process arg value) cost-fn))))))
+                  (return-from process (funcall rewrite-fn node value))))
+         (process node value)))))
 
-(def-search-rose search-rose-n-rewrites rose-node-n-rewrites fixnum)
-(def-search-rose search-rose-weight rose-node-weight single-float)
+(declaim (inline search-rewrite-n-rewrites search-rewrite-weight))
+(def-search-rewrite search-rewrite-n-rewrites rose-node-n-rewrites fixnum)
+(def-search-rewrite search-rewrite-weight rose-node-weight single-float)

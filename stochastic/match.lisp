@@ -137,3 +137,12 @@ everything else and bind ?VAR."
       (values (process pat)
               `(when (and ,@checks)
                  ,cont-expr)))))
+
+(defmacro do-matches* (top-node-var &body clauses)
+  `(progn ,@(expand-match
+             (list top-node-var)
+             (mapcar (lambda (clause)
+                       (bind (((pat . body) clause))
+                         (multiple-value-list
+                          (decompose-occur-check pat `(progn ,@body)))))
+                     clauses))))
