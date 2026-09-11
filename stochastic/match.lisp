@@ -121,7 +121,7 @@ everything else and bind ?VAR."
                       always (node-equal (svref x i) (svref y i)))))))
     (process x y)))
 
-(defun decompose-occur-check (pat cont-expr)
+(defun decompose-consistency-check (pat cont-expr)
   (let (vars checks)
     (labels ((process (pat)
                (cond ((consp pat)
@@ -145,6 +145,6 @@ everything else and bind ?VAR."
              (list top-node-var)
              (mapcar (lambda (clause)
                        (bind (((pat . body) clause))
-                         (multiple-value-list
-                          (decompose-occur-check pat `(progn ,@body)))))
+                             (multiple-value-list
+                              (decompose-consistency-check pat `(progn ,@body)))))
                      clauses))))

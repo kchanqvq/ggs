@@ -272,16 +272,17 @@
 (defun stochastic-search-1
     (term rule-set cost-fn
      &key (finish-flag (list nil)) (seed 0) (stride 1)
-       (beta 2.0) (inf-temp-period 100) (inf-temp-iters 3)
-       (max-stall 16000) (max-restart 64)
-       (target-cost 0) max-time
+       (beta 2.0)
+       (soft-walk 0) (soft-stall nil) (hard-walk soft-walk) (max-stall 16000)
+       (target-cost 0) max-time (max-restart 64)
        (proxy-cost-fn cost-fn)
-       verbose)
-  (declare ((or null fixnum) inf-temp-period)
-           ((or null fixnum) inf-temp-iters)
+       verbose save-cost-history)
+  (declare ((or null integer) soft-stall max-restart)
+           (integer hard-walk soft-walk)
            (single-float beta))
-  (bind ((end-time (and max-time
-                        (+ (get-internal-real-time)
+  (bind ((start-time (get-internal-real-time))
+         (end-time (and max-time
+                        (+ start-time
                            (* max-time internal-time-units-per-second))))
          ((compute-weights sample-inf-temp sample-fin-temp)
           (mapcar (curry #'getf (compiled-rule-set rule-set proxy-cost-fn))
@@ -294,18 +295,22 @@
          (best-term (node-term init-node))
          (best-cost init-cost)
          (n-accepted 0)
-         (n-restart 0))
+         (n-restart 0)
+         (cost-history '()))
     (declare ((function (t) cost) cost-fn proxy-cost-fn))
     (float-features:with-float-traps-masked t
       ;; Outer loop: restart with different seeds
       (block solve
-        (loop for seed from seed below (+ seed max-restart) by stride do
+        (loop for seed-1 from seed by stride do
           ;; Inner loop: one run of stochastic search
-          (let* ((*random-state* (sb-ext:seed-random-state seed))
+          (let* ((*random-state* (sb-ext:seed-random-state seed-1))
                  (node init-node)
                  (best-cost-1 init-cost)
-                 (n-stall 0))
-            (declare (fixnum n-accepted n-restart))
+                 (n-stall 0)
+                 (best-cost-soft init-cost)
+                 (n-stall-soft 0)
+                 (n-walk hard-walk))
+            (declare (integer n-accepted n-restart n-stall n-stall-soft n-walk))
             (incf n-restart)
             (loop for i of-type fixnum from 0 do
               (progn
@@ -322,19 +327,19 @@
                           (zerop (rose-node-n-rewrites node)))
                   (return))
 
-                (if (and inf-temp-period inf-temp-iters
-                         (< (mod i inf-temp-period)
-                            inf-temp-iters))
-                    (setq node
-                          (search-rewrite-n-rewrites
-                           node (random (rose-node-n-rewrites node))
-                           proxy-cost-fn sample-inf-temp))
-                    (setq node
-                          (search-rewrite-weight
-                           node (random (rose-node-weight node))
-                           proxy-cost-fn
-                           (lambda (subject weight)
-                             (funcall sample-fin-temp subject weight beta-constant)))))
+                (cond ((plusp n-walk)
+                       (decf n-walk)
+                       (setq node
+                             (search-rewrite-n-rewrites
+                              node (random (rose-node-n-rewrites node))
+                              proxy-cost-fn sample-inf-temp)))
+                      (t
+                       (setq node
+                             (search-rewrite-weight
+                              node (random (rose-node-weight node))
+                              proxy-cost-fn
+                              (lambda (subject weight)
+                                (funcall sample-fin-temp subject weight beta-constant))))))
 
                 (incf n-accepted)
                 (let ((cost (funcall cost-fn node)))
@@ -349,26 +354,60 @@
                         (when (< cost best-cost)
                           (setq best-cost cost
                                 best-term (node-term node))
+                          (when save-cost-history
+                            (push (list (- (get-internal-real-time) start-time) cost)
+                                  cost-history))
                           (when (<= cost target-cost)
                             (setf (car finish-flag) t)
                             (return-from solve))))
                       (incf n-stall))
+
+                  ;; inf-temp walk (soft restart) bookkeeping
+                  (if (or (plusp n-walk) (< cost best-cost-soft))
+                      (setq best-cost-soft cost
+                            n-stall-soft 0)
+                      (incf n-stall-soft))
+                  (when (and soft-stall (>= n-stall-soft soft-stall))
+                    (setq n-walk soft-walk
+                          n-stall-soft 0))
+
                   ;; Check for restart
                   (unless (and (< n-stall max-stall)
                                (< cost +inf-cost+))
                     (when verbose
                       (format t "~&Iteration ~a/~a restart ~a ~a~%"
                               seed i cost (node-term node)))
-                    (return)))))))))
-    (values best-cost best-term (list :n-accepted n-accepted :n-restart n-restart))))
+                    (return))
+
+                  (when (and max-restart (>= seed-1 (+ seed max-restart)))
+                    (return-from solve)))))))))
+    (values best-cost best-term
+            `( :n-accepted ,n-accepted :n-restart ,n-restart
+               ,@(when save-cost-history `(:cost-history ,(nreverse cost-history)))))))
+
+(defun merge-cost-history (st1 st2)
+  "Merge two time-ordered (TIME COST) lists, keeping only strict improvements."
+  (let ((st '())
+        (best-cost +inf-cost+))
+    (loop
+      (when (or (not st1) (and st2 (>= (caar st1) (caar st2))))
+        (rotatef st1 st2))
+      (when (not st1) (return))
+      (when (< (cadar st1) best-cost)
+        (setq best-cost (cadar st1))
+        (push (car st1) st))
+      (pop st1))
+    (nreverse st)))
 
 (defun reduce-stochastic-result (results-1 results-2)
-  (destructuring-bind (bc1 bt1 (&key ((:n-accepted na1)) ((:n-restart nr1)))) results-1
-    (destructuring-bind (bc2 bt2 (&key ((:n-accepted na2)) ((:n-restart nr2)))) results-2
-      (append (if (< bc1 bc2)
-                  (list bc1 bt1)
-                  (list bc2 bt2))
-              (list (list :n-accepted (+ na1 na2) :n-restart (+ nr1 nr2)))))))
+  (bind (((bc1 bt1 plist1) results-1)
+         ((bc2 bt2 plist2) results-2)
+         ((:plist (na1 :n-accepted) (nr1 :n-restart) (st1 :cost-history 'unbound)) plist1)
+         ((:plist (na2 :n-accepted) (nr2 :n-restart) (st2 :cost-history 'unbound)) plist2))
+    `(,@(if (< bc1 bc2) (list bc1 bt1) (list bc2 bt2))
+      ( :n-accepted ,(+ na1 na2) :n-restart ,(+ nr1 nr2)
+        ,@(unless (eq st1 'unbound)
+            `(:cost-history ,(merge-cost-history st1 st2)))))))
 
 (defun worker-loop ()
   (with-standard-io-syntax
@@ -382,16 +421,16 @@
 
 (defun stochastic-search (term rule-set cost-fn &rest args
                           &key (seed 0) (stride 1)
-                            (beta 2.0) (inf-temp-period 100) (inf-temp-iters 3)
-                            (max-stall 16000) (max-restart 64)
-                            (target-cost 0) max-time
+                            (beta 2.0)
+                            (soft-walk 0) (soft-stall nil) (hard-walk soft-walk) (max-restart 64)
+                            (target-cost 0) max-time (max-stall 16000)
                             (proxy-cost-fn cost-fn)
-                            verbose
+                            verbose save-cost-history
                             (nproc 1) workers)
-  (declare (ignore beta inf-temp-period inf-temp-iters
-                   max-stall max-restart
+  (declare (ignore beta
+                   max-stall max-restart soft-stall hard-walk
                    target-cost max-time
-                   verbose))
+                   verbose save-cost-history))
   (cond (workers
          (let ((n-workers (length workers)))
            (multiple-value-bind (nproc rem) (floor nproc n-workers)
