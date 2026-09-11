@@ -96,10 +96,10 @@ everything else and bind ?VAR."
              (case/bind (rose-node-fsym ,var) ,@node-clauses)
              (case/bind ,var ,@atom-clauses)))))))
 
-(defun expand-template (tmpl cost-fn)
+(defun expand-template (tmpl cost-fn user-decls)
   (labels ((process (tmpl)
              (cond ((and (consp tmpl) (eql (car tmpl) :eval))
-                    (cadr tmpl))
+                    `(locally (declare ,@user-decls) ,(cadr tmpl)))
                    ((consp tmpl)
                     `(let ((new-node
                              (vector 0.0 -1 1 ',(car tmpl)
@@ -111,13 +111,15 @@ everything else and bind ?VAR."
     (process tmpl)))
 
 (defun node-equal (x y)
-  (cond
-    ((and (not (rose-node-p x)) (not (rose-node-p y))) (eql x y))
-    ((and (rose-node-p x) (rose-node-p y))
-     (unless (= (length x) (length y))
-       (return-from node-equal nil))
-     (loop for i from (1- +rose-node-args-offset+) below (length x)
-           always (node-equal (svref x i) (svref y i))))))
+  (labels ((process (x y)
+             (cond
+               ((and (not (rose-node-p x)) (not (rose-node-p y))) (eql x y))
+               ((and (rose-node-p x) (rose-node-p y))
+                (unless (= (length x) (length y))
+                  (return-from node-equal nil))
+                (loop for i from (1- +rose-node-args-offset+) below (length x)
+                      always (node-equal (svref x i) (svref y i)))))))
+    (process x y)))
 
 (defun decompose-occur-check (pat cont-expr)
   (let (vars checks)

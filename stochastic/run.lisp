@@ -30,63 +30,115 @@
 (defconstant +inf-cost+ 100000000)
 (deftype cost () `(integer 0 ,+inf-cost+))
 
-(defun compute-rule-set-lambda (cost-fn rules)
-  (let ((matcher
-          (macroexpand-1
-           `(do-matches* subject
-              ,@(mapcar (lambda (rule)
-                          (destructuring-bind (lhs rhs &key (guard t)) rule
-                            (list lhs
-                                  (if-let (expand-fn (get cost-fn 'expand-cost-fn))
-                                    `(when ,guard
-                                       (yield-rewrite ,(funcall expand-fn rhs)
-                                                      ,(expand-template rhs cost-fn)))
-                                    `(when ,guard
-                                       (let ((candidate ,(expand-template rhs cost-fn)))
-                                         (yield-rewrite (cost #',cost-fn candidate) candidate)))))))
-                        rules)))))
+(defun get-user-decls (env)
+  `((optimize ,@(remove-if-not (lambda (policy)
+                                 (member (car policy) '(speed safety)))
+                               (cl-environments:declaration-information 'optimize env)))))
+
+(defun compute-rule-set-lambda (rules cost-fn user-decls)
+  (bind (((:flet match-clause (rule))
+          (destructuring-bind (lhs rhs &key (guard t)) rule
+            (list lhs
+                  `(when (locally (declare ,@user-decls) ,guard)
+                     (yield-rewrite ,(funcall (get cost-fn 'expand-cost-fn) rhs)
+                                    ,(expand-template rhs cost-fn user-decls))))))
+         ;; Partition rules into that may match compound terms, and may match
+         ;; constant.  The partition might not be disjoint, e.g. top-level ?a
+         ;; matches both compound terms and constants.
+         (compound-rules
+          (remove-if-not (lambda (lhs) (if (consp lhs) (cdr lhs) (var-p lhs)))
+                         rules :key #'car))
+         (compound-matcher
+          (macroexpand-1 `(do-matches* subject ,@(mapcar #'match-clause compound-rules))))
+         (constant-rules
+          ;; Turn ?a into (?a) so it only match constants.  For stochastic
+          ;; backend, "constant term" and "constant function symbol" happens to
+          ;; be the same because of unboxed representation.
+          (mapcar (lambda (rule) (cons (ensure-list (car rule)) (cdr rule)))
+                  (remove-if-not (lambda (lhs) (if (consp lhs) (null (cdr lhs)) t))
+                                 rules :key #'car)))
+         (constant-matcher
+          (macroexpand-1 `(do-matches* arg ,@(mapcar #'match-clause constant-rules)))))
+
     `(compute-weights
-      (lambda (subject node beta-constant)
-        (declare (optimize speed)
-                 (rose-node node)
+      (lambda (subject beta-constant)
+        (declare (optimize speed (safety 0))
+                 (rose-node subject)
                  (fixnum beta-constant))
         (let ((cost (cost #',cost-fn subject)))
           (declare (ignorable cost))
           (macrolet ((yield-rewrite (cost-expr constructor)
                        (declare (ignore constructor))
-                       `(locally (declare (optimize (safety 0)))
-                          (incf (rose-node-n-rewrites node))
-                          (incf (rose-node-weight node)
+                       `(progn
+                          (incf (rose-node-n-rewrites subject))
+                          (incf (rose-node-weight subject)
                                 (fastexp2 (- cost ,cost-expr) beta-constant)))))
-            ,matcher)))
+            ,compound-matcher))
+        ,(when constant-rules
+           `(do-rose-node-args (arg subject)
+              ;; FIXME: assume all constant has the same cost
+              (let ((cost ,(funcall (get cost-fn 'expand-cost-fn) 0)
+                          #+nil (cost #',cost-fn arg)))
+                (macrolet ((yield-rewrite (cost-expr constructor)
+                             (declare (ignore constructor))
+                             `(progn
+                                (incf (rose-node-n-rewrites subject))
+                                (incf (rose-node-weight subject)
+                                      (fastexp2 (- cost ,cost-expr) beta-constant)))))
+                  ,constant-matcher)))))
+
       sample-inf-temp
       (lambda (subject n-rewrites)
-        (declare (optimize speed)
+        (declare (optimize speed (safety 0))
+                 (rose-node subject)
                  (fixnum n-rewrites))
         (block sample
           (macrolet ((yield-rewrite (cost-expr constructor)
                        (declare (ignore cost-expr))
-                       `(locally (declare (optimize (safety 0)))
+                       `(progn
                           (decf n-rewrites)
                           (when (minusp n-rewrites)
-                            (return-from sample (values n-rewrites ,constructor))))))
-            ,matcher)
-          (values n-rewrites nil)))
+                            (return-from sample ,constructor)))))
+            ,compound-matcher)
+          ,(when constant-rules
+             `(do-rose-node-args ((arg i) subject)
+                (macrolet ((yield-rewrite (cost-expr constructor)
+                             (declare (ignore cost-expr))
+                             `(progn
+                                (decf n-rewrites)
+                                (when (minusp n-rewrites)
+                                  (return-from sample
+                                    (node-replace-arg subject i ,constructor #',',cost-fn))))))
+                  ,constant-matcher)))
+          subject))
+
       sample-fin-temp
       (lambda (subject weight beta-constant)
-        (declare (optimize speed)
+        (declare (optimize speed (safety 0))
+                 (rose-node subject)
                  (single-float weight)
                  (fixnum beta-constant))
         (block sample
           (let ((cost (cost #',cost-fn subject)))
             (declare (ignorable cost))
             (macrolet ((yield-rewrite (cost-expr constructor)
-                         `(locally (declare (optimize (safety 0)))
+                         `(progn
                             (decf weight (fastexp2 (- cost ,cost-expr) beta-constant))
                             (when (minusp weight)
-                              (return-from sample (values weight ,constructor))))))
-              ,matcher))
-          (values weight nil))))))
+                              (return-from sample ,constructor)))))
+              ,compound-matcher))
+          ,(when constant-rules
+             `(do-rose-node-args ((arg i) subject)
+                ;; FIXME: assume all constant has the same cost
+                (let ((cost ,(funcall (get cost-fn 'expand-cost-fn) 0)))
+                  (macrolet ((yield-rewrite (cost-expr constructor)
+                               `(progn
+                                  (decf weight (fastexp2 (- cost ,cost-expr) beta-constant))
+                                  (when (minusp weight)
+                                    (return-from sample
+                                      (node-replace-arg subject i ,constructor #',',cost-fn))))))
+                    ,constant-matcher))))
+          subject)))))
 
 (defun get-rules-resolve-symbols (name)
   (mapcan (lambda (rule)
@@ -95,23 +147,32 @@
                 (list rule)))
           (get-rules name)))
 
-(defmacro precompile-rule-set (name cost-fn)
-  (let ((rules (get-rules-resolve-symbols name)))
-    `(let ((rules (get-rules-resolve-symbols ',name)))
-       (assert (equal rules ',rules))
-       (ensure-cache (assoc-value (get ',name 'compiled-rules) ',cost-fn) rules
-                     (list ,@(collecting
-                               (doplist (key lambda (compute-rule-set-lambda cost-fn rules))
-                                        (collect `',key)
-                                 (collect lambda))))))))
+(defvar *compiled-rule-sets* (make-hash-table :test 'equal))
+
+(defmacro precompile-rule-set (name cost-fn &environment env)
+  (let ((rules (get-rules-resolve-symbols name))
+        (user-decls (get-user-decls env)))
+    `(let ((rules ',rules))
+       (unless (equal rules (get-rules-resolve-symbols ',name))
+         (warn "Rule set ~A changed between compile and load time" ',name))
+       (setf (gethash (list rules ',cost-fn ',user-decls)
+                      *compiled-rule-sets*)
+             (list ,@(collecting
+                       (doplist (key lambda (compute-rule-set-lambda
+                                             rules cost-fn user-decls))
+                         (collect `',key)
+                         (collect lambda))))))))
 
 (defun compiled-rule-set (name cost-fn)
-  (let ((rules (get-rules-resolve-symbols name)))
-    (ensure-cache (assoc-value (get name 'compiled-rules) cost-fn) rules
-                  (collecting
-                    (doplist (key lambda (compute-rule-set-lambda cost-fn (get-rules-resolve-symbols name)))
-                             (collect key)
-                      (collect (compile nil lambda)))))))
+  (let ((rules (get-rules-resolve-symbols name))
+        (user-decls (get-user-decls nil)))
+    (ensure-gethash (list rules cost-fn user-decls)
+                    *compiled-rule-sets*
+                    (collecting
+                      (doplist (key lambda (compute-rule-set-lambda
+                                            rules cost-fn user-decls))
+                        (collect key)
+                        (collect (compile nil lambda)))))))
 
 ;;; FIXME: the following assumes:
 ;;; 1. :eval only result in constants, never compound terms
@@ -168,23 +229,19 @@
 
 (defun recompute-rose (node compute-weights beta-constant)
   (declare (optimize speed (safety 0))
-           ((function (rose-node rose-node fixnum) t) compute-weights))
+           ((function (rose-node fixnum) null) compute-weights))
   (labels ((process (node)
              (declare (rose-node node))
-             (flet ((consider-rewrites (subject)
-                      (funcall compute-weights subject node beta-constant)))
-               (setf (rose-node-n-rewrites node) 0)
-               (do-rose-node-args (arg node)
-                 (if (rose-node-p arg)
-                     (progn
-                       (when (minusp (rose-node-n-rewrites arg))
-                         (process arg))
-                       (incf (rose-node-n-rewrites node) (rose-node-n-rewrites arg))
-                       (incf (rose-node-weight node) (rose-node-weight arg)))
-                     ;; Probability weight of constant symbol children
-                     ;; are counted together
-                     (consider-rewrites arg)))
-               (consider-rewrites node))))
+             (setf (rose-node-n-rewrites node) 0)
+             (do-rose-node-args (arg node)
+               (when (rose-node-p arg)
+                 (when (minusp (rose-node-n-rewrites arg))
+                   (process arg))
+                 (incf (rose-node-n-rewrites node) (rose-node-n-rewrites arg))
+                 (incf (rose-node-weight node) (rose-node-weight arg))))
+             ;; Probability weight of constant symbol children
+             ;; are counted together
+             (funcall compute-weights node beta-constant)))
     (when (rose-node-p node)
       (when (minusp (rose-node-n-rewrites node))
         (process node)))))
@@ -197,52 +254,20 @@
 (defun sample-rewrite-inf-temp (root sample-fn proxy-cost-fn)
   (declare (optimize speed)
            ((function (t) cost) proxy-cost-fn)
-           ((function (t fixnum) (values fixnum t)) sample-fn))
+           ((function (t fixnum) t) sample-fn))
   (search-rewrite-n-rewrites
    root (random (rose-node-n-rewrites root)) proxy-cost-fn
-   (lambda (subject n-rewrites)
-     (declare (rose-node subject)
-              (fixnum n-rewrites))
-     (block sample
-       (let (result)
-         ;; rewrites for this rose node
-         (setf (values n-rewrites result)
-               (funcall sample-fn subject n-rewrites))
-         (when (minusp n-rewrites)
-           (return-from sample result))
-         ;; rewrites for constant symbol children
-         (do-rose-node-args ((arg i) subject)
-           (unless (rose-node-p arg)
-             (setf (values n-rewrites result) (funcall sample-fn arg n-rewrites))
-             (when (minusp n-rewrites)
-               (return-from sample (node-replace-arg subject i result proxy-cost-fn))))))
-       subject))))
+   sample-fn))
 
 (defun sample-rewrite-fin-temp (root sample-fn proxy-cost-fn beta-constant)
   (declare (optimize speed)
            ((function (t) cost) proxy-cost-fn)
-           ((function (t single-float fixnum) (values single-float t)) sample-fn)
+           ((function (t single-float fixnum) t) sample-fn)
            (fixnum beta-constant))
   (search-rewrite-weight
    root (random (rose-node-weight root)) proxy-cost-fn
    (lambda (subject weight)
-     (declare (rose-node subject)
-              (single-float weight))
-     (block sample
-       (let (result)
-         ;; rewrites for this rose node
-         (setf (values weight result)
-               (funcall sample-fn subject weight beta-constant))
-         (when (minusp weight)
-           (return-from sample result))
-         ;; rewrites for constant symbol children
-         (do-rose-node-args ((arg i) subject)
-           (unless (rose-node-p arg)
-             (setf (values weight result)
-                   (funcall sample-fn arg weight beta-constant))
-             (when (minusp weight)
-               (return-from sample (node-replace-arg subject i result proxy-cost-fn)))))
-         subject)))))
+     (funcall sample-fn subject weight beta-constant))))
 
 (defun stochastic-search-1
     (term rule-set cost-fn
@@ -300,8 +325,16 @@
                 (if (and inf-temp-period inf-temp-iters
                          (< (mod i inf-temp-period)
                             inf-temp-iters))
-                    (setq node (sample-rewrite-inf-temp node sample-inf-temp proxy-cost-fn))
-                    (setq node (sample-rewrite-fin-temp node sample-fin-temp proxy-cost-fn beta-constant)))
+                    (setq node
+                          (search-rewrite-n-rewrites
+                           node (random (rose-node-n-rewrites node))
+                           proxy-cost-fn sample-inf-temp))
+                    (setq node
+                          (search-rewrite-weight
+                           node (random (rose-node-weight node))
+                           proxy-cost-fn
+                           (lambda (subject weight)
+                             (funcall sample-fin-temp subject weight beta-constant)))))
 
                 (incf n-accepted)
                 (let ((cost (funcall cost-fn node)))

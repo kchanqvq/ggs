@@ -2,8 +2,7 @@
     (:use #:cl #:alexandria)
   (:import-from #:serapeum #:with-collector #:string-prefix-p #:eval-always #:-> #:partition)
   (:export #:define-variadic-structure
-           #:var-p #:gensym-1 #:ensure-cache
-           #:get-rules #:defrw #:defrw*))
+           #:var-p #:gensym-1 #:get-rules #:defrw #:defrw*))
 
 (in-package :ggs/common)
 
@@ -57,14 +56,6 @@
 
 (defun gensym-1 (thing)
   (make-gensym (princ-to-string thing)))
-
-(defmacro ensure-cache (place key newval)
-  "Helper for cache maintenance. If PLACE contains a list (OLDKEY OLDVAL) and
-OLDKEY is equal to KEY, return OLDVAL.  Otherwise evaluate NEWVAL, store (KEY
-NEWVAL) into PLACE and return NEWVAL."
-  `(if (equal (first ,place) ,key)
-       (second ,place)
-       (second (setf ,place (list ,key ,newval)))))
 
 (defun get-rules (name)
   (let ((rules (get name 'rules '%unbound)))

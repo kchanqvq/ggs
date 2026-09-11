@@ -127,7 +127,7 @@ CLASSES and FSYM-TABLE are only up-to-date after `egraph-rebuild'."
 
 (defun make-analysis-data (eclass-info enode)
   (let ((analysis-info-list (egraph-analysis-info-list *egraph*)))
-    (do-eclass-info-data ((datum i) eclass-info)
+    (dotimes (i (eclass-info-n-data eclass-info))
       (setf (eclass-info-datum i eclass-info)
             (funcall (analysis-info-make (pop analysis-info-list)) enode)))))
 

@@ -35,6 +35,7 @@
                :serapeum
                :ggs/common
                :metabang-bind
+               :cl-environments
                :float-features
                :bordeaux-threads)
   :components ((:file "package")
