@@ -16,10 +16,11 @@
 (defun fastexp2 (p base-constant)
   (declare (optimize speed (safety 0))
            (fixnum p base-constant))
-  (min (float-features:bits-single-float
-        (max 0 (min #x7F800000 (+ (the fixnum (* p base-constant))
-                                  (- (ash 127 23) 366393)))))
-       1e20))
+  ;; BITS-SINGLE-FLOAT is monotone for positive floats
+  (float-features:bits-single-float
+   (max 0 (min (float-features:single-float-bits 1e20)
+               (+ (the fixnum (* p base-constant))
+                  (- (ash 127 23) 366393))))))
 
 (declaim (inline cost))
 (defun cost (cost-fn node)
@@ -245,29 +246,6 @@
     (when (rose-node-p node)
       (when (minusp (rose-node-n-rewrites node))
         (process node)))))
-
-(declaim (inline sample-rewrite-inf-temp sample-rewrite-fin-temp))
-
-;; PROXY-COST-FN is still needed because SEARCH-ROSE-N-REWRITES need
-;; to construct new nodes along the spine, whose cost need to be
-;; computed
-(defun sample-rewrite-inf-temp (root sample-fn proxy-cost-fn)
-  (declare (optimize speed)
-           ((function (t) cost) proxy-cost-fn)
-           ((function (t fixnum) t) sample-fn))
-  (search-rewrite-n-rewrites
-   root (random (rose-node-n-rewrites root)) proxy-cost-fn
-   sample-fn))
-
-(defun sample-rewrite-fin-temp (root sample-fn proxy-cost-fn beta-constant)
-  (declare (optimize speed)
-           ((function (t) cost) proxy-cost-fn)
-           ((function (t single-float fixnum) t) sample-fn)
-           (fixnum beta-constant))
-  (search-rewrite-weight
-   root (random (rose-node-weight root)) proxy-cost-fn
-   (lambda (subject weight)
-     (funcall sample-fn subject weight beta-constant))))
 
 (defun stochastic-search-1
     (term rule-set cost-fn

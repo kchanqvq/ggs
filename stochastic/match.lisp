@@ -1,18 +1,10 @@
 (in-package :ggs/stochastic)
 
-(defmacro klet (((name (&rest args) &body kbody)) &body body)
-  `(flet ((,name ,args ,@kbody))
-     (declare (dynamic-extent #',name))
-     ,@body))
-
 (defun subst-row (new old pat-row)
-  (maplist (lambda (tail)
-             (if (cdr tail)
-                 (subst new old (car tail))
-                 `(let ((,old ,new))
-                    (declare (ignorable ,old))
-                    ,(car tail))))
-           pat-row))
+  (append (butlast pat-row)
+          (list `(let ((,old ,new))
+                   (declare (ignorable ,old))
+                   ,(lastcar pat-row)))))
 
 (defmacro case/bind (keyform &body cases)
   "Like CASE, but also support ((?VAR) ...) clauses, which run before

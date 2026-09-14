@@ -45,7 +45,8 @@ evaluate CONT-EXPR."
                          (lhs-bound-p
                           `(gethash ,var (fsym-info-node-table ,fsym-info-var)))
                          (t `(fsym-info-nodes ,fsym-info-var))))
-           ;; FIXME: remove SVREF bound checks, because we've checked arity first
+           ;; We check arity first, and SBCL seems to know to eliminate SVREF
+           ;; bound checks in the body
            (when (= (enode-n-args ,node-var) ,(length arg-vars))
              (let (,@(when fsym-var-p
                        `((,fsym (enode-fsym ,node-var))))
