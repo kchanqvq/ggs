@@ -37,12 +37,8 @@
                                (cl-environments:declaration-information 'optimize env)))))
 
 (defun compute-rule-set-lambda (rules cost-fn user-decls)
-  (bind (((:flet match-clause (rule))
-          (destructuring-bind (lhs rhs &key (guard t)) rule
-            (list lhs
-                  `(when (locally (declare ,@user-decls) ,guard)
-                     (yield-rewrite ,(funcall (get cost-fn 'expand-cost-fn) rhs)
-                                    ,(expand-template rhs cost-fn user-decls))))))
+  (bind (((:flet wrap-user-decls (rule))
+          `(,(car rule) (locally (declare ,@user-decls) ,@(cdr rule))))
          ;; Partition rules into that may match compound terms, and may match
          ;; constant.  The partition might not be disjoint, e.g. top-level ?a
          ;; matches both compound terms and constants.
@@ -50,68 +46,60 @@
           (remove-if-not (lambda (lhs) (if (consp lhs) (cdr lhs) (var-p lhs)))
                          rules :key #'car))
          (compound-matcher
-          (macroexpand-1 `(do-matches* subject ,@(mapcar #'match-clause compound-rules))))
+           (macroexpand-1 `(do-matches* subject ,@(mapcar #'wrap-user-decls compound-rules))))
          (constant-rules
-          ;; Turn ?a into (?a) so it only match constants.  For stochastic
-          ;; backend, "constant term" and "constant function symbol" happens to
-          ;; be the same because of unboxed representation.
-          (mapcar (lambda (rule) (cons (ensure-list (car rule)) (cdr rule)))
-                  (remove-if-not (lambda (lhs) (if (consp lhs) (null (cdr lhs)) t))
-                                 rules :key #'car)))
+           (remove-if-not (lambda (lhs)
+                            (or (atom lhs)
+                                (null (cdr lhs))
+                                (and (null (cddr lhs)) (seq-var-p (cadr lhs)))))
+                          rules :key #'car))
          (constant-matcher
-          (macroexpand-1 `(do-matches* arg ,@(mapcar #'match-clause constant-rules)))))
+           (macroexpand-1 `(do-matches* arg ,@(mapcar #'wrap-user-decls constant-rules)))))
 
     `(compute-weights
       (lambda (subject beta-constant)
         (declare (optimize speed (safety 0))
                  (rose-node subject)
                  (fixnum beta-constant))
-        (let ((cost (cost #',cost-fn subject)))
-          (declare (ignorable cost))
-          (macrolet ((yield-rewrite (cost-expr constructor)
-                       (declare (ignore constructor))
-                       `(progn
-                          (incf (rose-node-n-rewrites subject))
-                          (incf (rose-node-weight subject)
-                                (fastexp2 (- cost ,cost-expr) beta-constant)))))
-            ,compound-matcher))
-        ,(when constant-rules
-           `(do-rose-node-args (arg subject)
-              ;; FIXME: assume all constant has the same cost
-              (let ((cost ,(funcall (get cost-fn 'expand-cost-fn) 0)
-                          #+nil (cost #',cost-fn arg)))
-                (macrolet ((yield-rewrite (cost-expr constructor)
-                             (declare (ignore constructor))
-                             `(progn
-                                (incf (rose-node-n-rewrites subject))
-                                (incf (rose-node-weight subject)
-                                      (fastexp2 (- cost ,cost-expr) beta-constant)))))
-                  ,constant-matcher)))))
+        (macrolet ((yield-rewrite (rhs)
+                     `(locally (declare (optimize speed (safety 0)))
+                        (incf (rose-node-n-rewrites subject))
+                        (incf (rose-node-weight subject)
+                              (fastexp2 (- cost ,(funcall (get ',cost-fn 'expand-cost-fn) rhs))
+                                        beta-constant)))))
+          (let ((cost (cost #',cost-fn subject)))
+            (declare (type cost cost)
+                     (ignorable cost))
+            ,compound-matcher)
+          ,(when constant-rules
+             `(do-rose-node-args (arg subject)
+                (unless (rose-node-p arg)
+                  (let ((cost (,cost-fn arg)))
+                    (declare (type cost cost)
+                             (ignorable cost))
+                    ,constant-matcher))))))
 
       sample-inf-temp
       (lambda (subject n-rewrites)
         (declare (optimize speed (safety 0))
                  (rose-node subject)
                  (fixnum n-rewrites))
-        (block sample
-          (macrolet ((yield-rewrite (cost-expr constructor)
-                       (declare (ignore cost-expr))
-                       `(progn
-                          (decf n-rewrites)
-                          (when (minusp n-rewrites)
-                            (return-from sample ,constructor)))))
-            ,compound-matcher)
-          ,(when constant-rules
-             `(do-rose-node-args ((arg i) subject)
-                (macrolet ((yield-rewrite (cost-expr constructor)
-                             (declare (ignore cost-expr))
-                             `(progn
-                                (decf n-rewrites)
-                                (when (minusp n-rewrites)
-                                  (return-from sample
-                                    (node-replace-arg subject i ,constructor #',',cost-fn))))))
-                  ,constant-matcher)))
-          subject))
+        (macrolet ((yield-rewrite (rhs)
+                     `(locally (declare (optimize speed (safety 0)))
+                        (decf n-rewrites)
+                        (when (minusp n-rewrites)
+                          (return-from sample
+                            (context ,(expand-template rhs ',cost-fn)))))))
+          (block sample
+            (macrolet ((context (rhs) rhs))
+              ,compound-matcher)
+            ,(when constant-rules
+               `(do-rose-node-args ((arg i) subject)
+                  (unless (rose-node-p arg)
+                    (macrolet ((context (rhs)
+                                 `(node-replace-arg subject i ,rhs #',',cost-fn)))
+                      ,constant-matcher))))
+            subject)))
 
       sample-fin-temp
       (lambda (subject weight beta-constant)
@@ -119,27 +107,30 @@
                  (rose-node subject)
                  (single-float weight)
                  (fixnum beta-constant))
-        (block sample
-          (let ((cost (cost #',cost-fn subject)))
-            (declare (ignorable cost))
-            (macrolet ((yield-rewrite (cost-expr constructor)
-                         `(progn
-                            (decf weight (fastexp2 (- cost ,cost-expr) beta-constant))
-                            (when (minusp weight)
-                              (return-from sample ,constructor)))))
-              ,compound-matcher))
-          ,(when constant-rules
-             `(do-rose-node-args ((arg i) subject)
-                ;; FIXME: assume all constant has the same cost
-                (let ((cost ,(funcall (get cost-fn 'expand-cost-fn) 0)))
-                  (macrolet ((yield-rewrite (cost-expr constructor)
-                               `(progn
-                                  (decf weight (fastexp2 (- cost ,cost-expr) beta-constant))
-                                  (when (minusp weight)
-                                    (return-from sample
-                                      (node-replace-arg subject i ,constructor #',',cost-fn))))))
-                    ,constant-matcher))))
-          subject)))))
+        (macrolet ((yield-rewrite (rhs)
+                     `(locally (declare (optimize speed (safety 0)))
+                        (decf weight (fastexp2
+                                      (- cost ,(funcall (get ',cost-fn 'expand-cost-fn) rhs))
+                                      beta-constant))
+                        (when (minusp weight)
+                          (return-from sample
+                            (context ,(expand-template rhs ',cost-fn)))))))
+          (block sample
+            (let ((cost (cost #',cost-fn subject)))
+              (declare (type cost cost)
+                       (ignorable cost))
+              (macrolet ((context (rhs) rhs))
+                ,compound-matcher))
+            ,(when constant-rules
+               `(do-rose-node-args ((arg i) subject)
+                  (unless (rose-node-p arg)
+                    (let ((cost (,cost-fn arg)))
+                      (declare (type cost cost)
+                               (ignorable cost))
+                      (macrolet ((context (rhs)
+                                   `(node-replace-arg subject i ,rhs #',',cost-fn)))
+                        ,constant-matcher)))))
+            subject))))))
 
 (defun get-rules-resolve-symbols (name)
   (mapcan (lambda (rule)
@@ -175,11 +166,6 @@
                         (collect key)
                         (collect (compile nil lambda)))))))
 
-;;; FIXME: the following assumes:
-;;; 1. :eval only result in constants, never compound terms
-;;; 2. non 0-ary function symbols are never reused as constants
-;;; 3. constants are all in the T case
-
 (defun get-case (key cases)
   (dolist (case cases)
     (cond ((eql (first case) t)
@@ -187,30 +173,33 @@
           ((member key (ensure-list (first case)))
            (return (second case))))))
 
-(defun default-case (cases)
-  (second (assoc t cases)))
-
 (defun expand-tree-sum-cost (tmpl cases)
   (let ((coefficients (make-hash-table))
-        (secant 0))
+        (secant 0)
+        (bindings '()))
     (labels ((process (tmpl)
-               (cond ((and (consp tmpl) (eql (car tmpl) :eval))
-                      (incf secant (default-case cases)))
-                     ((consp tmpl)
+               (cond ((consp tmpl)
                       (incf secant (get-case (car tmpl) cases))
                       (mapc #'process (cdr tmpl)))
                      ((var-p tmpl)
                       (incf (gethash tmpl coefficients 0)))
-                     (t (incf secant (default-case cases))))))
+                     (t (incf secant (get-case tmpl cases)))))
+             (var-cost (var)
+               (if (seq-var-p var)
+                   `(reduce #'+ ,var :key (lambda (v)
+                                            (if (rose-node-p v)
+                                                (rose-node-cost v)
+                                                (case v ,@cases))))
+                   `(if (rose-node-p ,var)
+                        (rose-node-cost ,var)
+                        (case ,var ,@cases)))))
       (process tmpl)
-      `(+ ,secant
-          ,@(serapeum:collecting
-              (maphash (lambda (var c)
-                         (collect `(the cost
-                                        (* ,c (if (rose-node-p ,var)
-                                                  (rose-node-cost ,var)
-                                                  ,(default-case cases))))))
-                       coefficients))))))
+      `(let ,bindings
+         (+ ,secant
+            ,@(serapeum:collecting
+                (maphash (lambda (var c)
+                           (collect `(the cost (* ,c ,(var-cost var)))))
+                         coefficients)))))))
 
 (defmacro define-tree-sum-cost (name &rest cases)
   `(progn
@@ -221,9 +210,9 @@
              (do-rose-node-args (arg node)
                (incf sum (if (rose-node-p arg)
                              (rose-node-cost arg)
-                             ,(default-case cases))))
+                             (case arg ,@cases))))
              sum)
-           ,(default-case cases)))
+           (case node ,@cases)))
      (eval-always
        (setf (get ',name 'expand-cost-fn)
              (lambda (tmpl) (expand-tree-sum-cost tmpl ',cases))))))
@@ -303,7 +292,7 @@
                 ;; although this probably is not usually useful.
                 (when (or (not (rose-node-p node))
                           (zerop (rose-node-n-rewrites node)))
-                  (return))
+                  (return-from solve))
 
                 (cond ((plusp n-walk)
                        (decf n-walk)

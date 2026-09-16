@@ -2,7 +2,7 @@
     (:use #:cl #:alexandria)
   (:import-from #:serapeum #:with-collector #:string-prefix-p #:eval-always #:-> #:partition)
   (:export #:define-variadic-structure
-           #:var-p #:gensym-1 #:get-rules #:defrw #:defrw*))
+           #:var-p #:seq-var-p #:gensym-1 #:get-rules #:defrw #:defrw* #:yield-rewrite))
 
 (in-package :ggs/common)
 
@@ -51,8 +51,10 @@
          `(svref ,,name (+ ,i ,',offset-const))))))
 
 (defun var-p (object)
-  (typecase object
-    (symbol (string-prefix-p "?" (symbol-name object)))))
+  (and (symbolp object) (string-prefix-p "?" (symbol-name object))))
+
+(defun seq-var-p (object)
+  (and (symbolp object) (string-prefix-p "??" (symbol-name object))))
 
 (defun gensym-1 (thing)
   (make-gensym (princ-to-string thing)))
@@ -67,4 +69,12 @@
   `(defrw* ,name ,rule))
 
 (defmacro defrw* (name &body rules)
-  `(eval-always (setf (get ',name 'rules) ',rules)))
+  (labels ((canonicalize (rule)
+             (cond ((symbolp rule) rule)
+                   ((eql (cadr rule) :eval)
+                    (cons (car rule) (cddr rule)))
+                   (t
+                    (destructuring-bind (rhs &key (guard t)) (rest rule)
+                      `(,(car rule)
+                        (when ,guard (yield-rewrite ,rhs))))))))
+    `(eval-always (setf (get ',name 'rules) ',(mapcar #'canonicalize rules)))))

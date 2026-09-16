@@ -34,6 +34,7 @@
   :depends-on (:alexandria
                :serapeum
                :ggs/common
+               :lp-hash-table
                :metabang-bind
                :cl-environments
                :float-features
