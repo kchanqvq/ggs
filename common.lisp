@@ -6,7 +6,7 @@
 
 (in-package :ggs/common)
 
-(defmacro define-variadic-structure (name &rest slot-and-options)
+(defmacro define-variadic-structure (name &body slot-and-options)
   (let* ((doc (and (stringp (car slot-and-options)) (pop slot-and-options)))
          (slot-and-options (mapcar #'ensure-list slot-and-options))
          (ordinary-slots (butlast slot-and-options))

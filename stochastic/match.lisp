@@ -21,10 +21,13 @@ everything else and bind ?VAR."
             (bind-forms `(progn ,@bind-forms))
             (real-cases `(case ,keyform ,@real-cases))))))
 
-(declaim (inline rose-node-arg-from))
-(defun rose-node-arg-from (k node)
-  (loop for i from (+ +rose-node-args-offset+ k) below (length node)
+(declaim (inline rose-node-arg-between rose-node-arg-from-end))
+(defun rose-node-arg-between (from-start from-end node)
+  (loop for i from (+ +rose-node-args-offset+ from-start)
+          to (- (length node) from-end)
         collect (svref node i)))
+(defun rose-node-arg-from-end (from-end node)
+  (svref node (- (length node) from-end)))
 
 (lp-hash-table:define-hash-table ordered-table sxhash equal :optimize ())
 
@@ -77,17 +80,17 @@ everything else and bind ?VAR."
             (let* ((n-args (car arity-info))
                    (arg-vars (make-gensym-list (car arity-info) (prin1-to-string fsym)))
                    (seq-var-pos (cadr arity-info)))
-              (when (and seq-var-pos (not (= seq-var-pos (1- n-args))))
-                (error "Unimplemented"))
               (when (> n-args 0)
                 (push `(when ,(if seq-var-pos
                                   `(>= (rose-node-n-args ,var) ,(1- n-args))
                                   `(= (rose-node-n-args ,var) ,n-args))
-                         (let ,(mapcar (lambda (i arg-var)
-                                         (if (eql i seq-var-pos)
-                                             `(,arg-var (rose-node-arg-from ,i ,var))
-                                             `(,arg-var (rose-node-arg ,i ,var))))
-                                       (iota n-args) arg-vars)
+                         (let ,(mapcar
+                                (lambda (i arg-var)
+                                  (case (if seq-var-pos (signum (- i seq-var-pos)) -1)
+                                    (-1 `(,arg-var (rose-node-arg ,i ,var)))
+                                    (0 `(,arg-var (rose-node-arg-between ,i ,(- n-args i) ,var)))
+                                    (1 `(,arg-var (rose-node-arg-from-end ,(- n-args i) ,var)))))
+                                (iota n-args) arg-vars)
                            ,@(expand-match
                               (append arg-vars (cdr var-list))
                               (mapcar (lambda (pat-row)
@@ -128,23 +131,23 @@ everything else and bind ?VAR."
   (labels ((process (tmpl)
              (cond
                ((consp tmpl)
-                (when (find-if #'seq-var-p (butlast (cdr tmpl)))
-                  (error "Unimplemented"))
-                (let ((fsym (if (var-p (car tmpl)) (car tmpl) `',(car tmpl))))
-                  (if (seq-var-p (lastcar tmpl))
-                      `(if ,(if (null (cddr tmpl)) (lastcar tmpl) t)
-                           (let ((new-node
-                                   (apply #'vector 0.0 -1 1 ,fsym
-                                          ,@(mapcar #'process (butlast (cdr tmpl)))
-                                          ,(lastcar tmpl))))
-                             (setf (rose-node-cost new-node) (,cost-fn new-node))
-                             new-node)
-                           ,fsym)
-                      `(let ((new-node
-                               (vector 0.0 -1 1 ,fsym
-                                       ,@(mapcar #'process (cdr tmpl)))))
+                (let* ((fsym (if (var-p (car tmpl)) (car tmpl) `',(car tmpl)))
+                       (first-seq-var-pos (position-if #'seq-var-p (cdr tmpl)))
+                       (head-args (subseq (cdr tmpl) 0 first-seq-var-pos))
+                       (tail-args (and first-seq-var-pos (subseq (cdr tmpl) first-seq-var-pos))))
+                  `(if ,(if (find-if-not #'seq-var-p (cdr tmpl)) t `(or ,@(cdr tmpl)))
+                       (let ((new-node
+                               (apply #'vector 0.0 -1 1 ,fsym
+                                      ,@(mapcar #'process head-args)
+                                      (append ,@(mapcar
+                                                 (lambda (arg)
+                                                   (if (seq-var-p arg)
+                                                       arg
+                                                       `(list ,(process arg))))
+                                                 tail-args)))))
                          (setf (rose-node-cost new-node) (,cost-fn new-node))
-                         new-node))))
+                         new-node)
+                       ,fsym)))
                ((var-p tmpl) tmpl)
                (t `',tmpl))))
     (process tmpl)))
