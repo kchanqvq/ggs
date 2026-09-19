@@ -180,11 +180,9 @@
 
 (defrw* const-fold
   ((+ (?a) (?b)) (:eval (+ ?a ?b))
-   :guard (and (numberp ?a) (numberp ?b))
-   :prune t)
+   :guard (and (numberp ?a) (numberp ?b)))
   ((* (?a) (?b)) (:eval (* ?a ?b))
-   :guard (and (numberp ?a) (numberp ?b))
-   :prune t))
+   :guard (and (numberp ?a) (numberp ?b))))
 
 (def-test const-fold ()
   (let* ((*egraph* (make-egraph))
@@ -194,7 +192,7 @@
     (egraph-rebuild)
     (is (eq :saturate
             (run-rewrites '(commute-add commute-mul assoc-add assoc-mul const-fold)
-                          :check t :max-iter 10)))
+                          :prune-constant #'numberp :check t :max-iter 10)))
     (is (eq (enode-find a) (enode-find b)))
     (is (equal 17 (greedy-extract c #'ast-size)))))
 

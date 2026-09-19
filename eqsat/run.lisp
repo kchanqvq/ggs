@@ -11,22 +11,18 @@
                      (slot-value c 'rule)))))
 
 (defun compute-rule-lambda (name rule)
-  (destructuring-bind (lhs rhs &key (guard t) prune) rule
-    `(lambda (&key match-limit)
-       (when match-limit
-         (let ((remaining match-limit))
-           (do-matches (top-node ,lhs)
-             (decf remaining)
-             (when (minusp remaining)
-               (error 'match-limit-exceeded
-                      :name ',name :rule ',rule :match-limit match-limit)))))
-       (do-matches (top-node ,lhs)
-         (when ,guard
-           (let ((rhs-node ,(expand-template rhs)))
-             (enode-merge top-node rhs-node)
-             ,(when prune
-                `(setf (eclass-info-nodes (enode-eclass-info top-node))
-                       (list rhs-node)))))))))
+  `(lambda (&key match-limit)
+     (when match-limit
+       (let ((remaining match-limit))
+         (do-matches (top-node ,(car rule))
+           (decf remaining)
+           (when (minusp remaining)
+             (error 'match-limit-exceeded
+                    :name ',name :rule ',rule :match-limit match-limit)))))
+     (do-matches (top-node ,(car rule))
+       (macrolet ((yield-rewrite (rhs)
+                    `(enode-merge top-node ,(expand-template rhs))))
+         ,@(cdr rule)))))
 
 (defvar *compiled-rules* (make-hash-table :test 'equal))
 
