@@ -45,22 +45,21 @@
         (selections (make-hash-table)))  ; map eclass to enode
     (loop
       (let (dirty)
-        (maphash-keys (lambda (class)
-                        (let ((selection (gethash class selections))
-                              (cost (gethash class costs)))
-                          (dolist (enode (list-enodes class))
-                            (let ((new-cost
-                                    (funcall cost-fn enode
-                                             (map-enode-args (rcurry #'gethash costs)
-                                                             enode))))
-                              (when (if cost (and new-cost (< new-cost cost))
-                                        new-cost)
-                                (setf selection enode
-                                      cost new-cost
-                                      dirty t))))
-                          (setf (gethash class selections) selection
-                                (gethash class costs) cost)))
-                      (egraph-classes *egraph*))
+        (dolist (class (egraph-class-list *egraph*))
+          (let ((selection (gethash class selections))
+                (cost (gethash class costs)))
+            (dolist (enode (list-enodes class))
+              (let ((new-cost
+                      (funcall cost-fn enode
+                               (map-enode-args (rcurry #'gethash costs)
+                                               enode))))
+                (when (if cost (and new-cost (< new-cost cost))
+                          new-cost)
+                  (setf selection enode
+                        cost new-cost
+                        dirty t))))
+            (setf (gethash class selections) selection
+                  (gethash class costs) cost)))
         (unless dirty (return))))
     (values selections costs)))
 

@@ -31,6 +31,11 @@ representativeness."
 (defmacro enode-representative-flag (enode)
   `(ldb (byte 1 1) (enode-flags ,enode)))
 
+;; `egraph-rebuild' use this to deduplicate eclasses while scanning the hash
+;; cons.
+(defmacro eclass-seen-flag (enode)
+  `(ldb (byte 1 2) (enode-flags ,enode)))
+
 (defun enode-canonical-p (enode)
   "This doesn't trust CANONICAL-FLAG, for sanity check."
   (do-enode-args (arg enode t)
@@ -93,13 +98,15 @@ function symbol."
      (defun ,name (enode) (get-analysis-data enode ',name))))
 
 (defstruct (egraph (:constructor make-egraph (&key analyses)))
-  "HASH-CONS stores all canonical enodes. CLASSES stores all
-eclass (i.e. representative enodes). FSYM-TABLE stores a `fsym-info' entry for
-every encountered function symbol.
+  "HASH-CONS stores all canonical enodes. CLASS-LIST lists all
+eclass (i.e. representative enodes) and N-ECLASSES is its length. FSYM-TABLE
+stores a `fsym-info' entry for every encountered function symbol.
 
-CLASSES and FSYM-TABLE are only up-to-date after `egraph-rebuild'."
+CLASS-LIST, N-ECLASSES and FSYM-TABLE are only up-to-date after
+`egraph-rebuild'."
   (hash-cons (make-hash-cons) :type hash-cons)
-  (classes (make-hash-table :test 'eq) :type hash-table)
+  (class-list nil :type list)
+  (n-eclasses 0 :type fixnum)
   (fsym-table (make-hash-table) :type hash-table)
   (work-list nil :type list)
   (analysis-info-list
@@ -247,28 +254,37 @@ CLASSES and FSYM-TABLE are only up-to-date after `egraph-rebuild'."
   ;; because canon-enodes might be non-rep, while rep-enodes might not be canon
   ;; thus not appear in `egraph-hash-cons' either so we can't simply test for
   ;; `enode-representative-flag'.
-  (clrhash (egraph-classes *egraph*))
-  (map-hash-cons (lambda (node)
-                   (setf (gethash (enode-find node) (egraph-classes *egraph*)) t))
-                 (egraph-hash-cons *egraph*))
+  (let ((classes nil)
+        (n-eclasses 0))
+    (declare (type fixnum n-eclasses))
+    (map-hash-cons (lambda (node)
+                     (let ((class (enode-find node)))
+                       (when (zerop (eclass-seen-flag class))
+                         (setf (eclass-seen-flag class) 1)
+                         (push class classes)
+                         (incf n-eclasses))))
+                   (egraph-hash-cons *egraph*))
+    ;; make `egraph-class-list' match insertion order
+    (setf (egraph-class-list *egraph*) (nreverse classes)
+          (egraph-n-eclasses *egraph*) n-eclasses))
   ;; Build various node index. We used to also prune non-canonical enodes from
   ;; eclass-info-parents here, but not doing it seems faster
   (clrhash (egraph-fsym-table *egraph*))
-  (maphash-keys (lambda (class)
-                  (let ((info (enode-parent class)))
-                    (setf (eclass-info-nodes info)
-                          (delete-if-not (lambda (n) (plusp (enode-canonical-flag n))) (eclass-info-nodes info)))
-                    (when prune-constant
-                      (dolist (node (eclass-info-nodes info))
-                        (when (funcall prune-constant (enode-fsym node))
-                          (setf (eclass-info-nodes info) (list node))
-                          (return))))
-                    (dolist (node (eclass-info-nodes info))
-                      (let ((fsym-info (ensure-gethash (enode-fsym node) (egraph-fsym-table *egraph*)
-                                                       (make-fsym-info))))
-                        (push node (gethash class (fsym-info-node-table fsym-info)))
-                        (push node (fsym-info-nodes fsym-info))))))
-                (egraph-classes *egraph*)))
+  (dolist (class (egraph-class-list *egraph*))
+    (setf (eclass-seen-flag class) 0)
+    (let ((info (enode-parent class)))
+      (setf (eclass-info-nodes info)
+            (delete-if-not (lambda (n) (plusp (enode-canonical-flag n))) (eclass-info-nodes info)))
+      (when prune-constant
+        (dolist (node (eclass-info-nodes info))
+          (when (funcall prune-constant (enode-fsym node))
+            (setf (eclass-info-nodes info) (list node))
+            (return))))
+      (dolist (node (eclass-info-nodes info))
+        (let ((fsym-info (ensure-gethash (enode-fsym node) (egraph-fsym-table *egraph*)
+                                         (make-fsym-info))))
+          (push node (gethash class (fsym-info-node-table fsym-info)))
+          (push node (fsym-info-nodes fsym-info)))))))
 
 ;;; Utils
 
@@ -291,10 +307,18 @@ CLASSES and FSYM-TABLE are only up-to-date after `egraph-rebuild'."
                      (setf (gethash (enode-find node) classes) t))
                    (egraph-hash-cons *egraph*))
     (format t "~&There're ~a eclasses.~%" (hash-table-count classes))
-    (when-let (diff (hash-table-keys-difference classes (egraph-classes *egraph*)))
-      (error "Missing eclasses:~% ~a" diff))
-    (when-let (diff (hash-table-keys-difference (egraph-classes *egraph*) classes))
-      (error "Extra eclasses:~% ~a" diff))
+    (let ((index (make-hash-table :test 'eq)))
+      (dolist (class (egraph-class-list *egraph*))
+        (setf (gethash class index) t))
+      (unless (= (hash-table-count index) (egraph-n-eclasses *egraph*))
+        (error "Duplicate eclasses in class list."))
+      (unless (= (length (egraph-class-list *egraph*)) (egraph-n-eclasses *egraph*))
+        (error "N-ECLASSES ~a disagrees with class list length ~a."
+               (egraph-n-eclasses *egraph*) (length (egraph-class-list *egraph*))))
+      (when-let (diff (hash-table-keys-difference classes index))
+        (error "Missing eclasses:~% ~a" diff))
+      (when-let (diff (hash-table-keys-difference index classes))
+        (error "Extra eclasses:~% ~a" diff)))
     (dolist (class (hash-table-keys classes))
       (let ((nodes (list-enodes class)))
         (dolist (node nodes)
@@ -333,6 +357,3 @@ Only contains canonical enodes after `egraph-rebuild'."
 
 (defun egraph-n-enodes (egraph)
   (hash-cons-count (egraph-hash-cons egraph)))
-
-(defun egraph-n-eclasses (egraph)
-  (hash-table-count (egraph-classes egraph)))
