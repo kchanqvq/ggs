@@ -11,11 +11,11 @@
 
 (defun term-node (term cost-fn)
   (labels ((process (term)
-             (if (consp term)
-                 (let ((new-node (apply #'vector 0.0 -1 0.0 (car term) (mapcar #'process (cdr term)))))
-                   (setf (rose-node-cost new-node) (funcall cost-fn new-node))
-                   new-node)
-                 term)))
+             (cond ((atom term) term)
+                   ((null (cdr term)) (car term))
+                   (t (let ((new-node (apply #'vector 0.0 -1 0 (car term) (mapcar #'process (cdr term)))))
+                        (setf (rose-node-cost new-node) (funcall cost-fn new-node))
+                        new-node)))))
     (process term)))
 
 (defun node-term (term)
@@ -45,8 +45,6 @@
 
 (defmacro def-search-rewrite (name accessor type)
   `(progn
-     ;; A rule's RHS can be a constant, so REWRITE-FN -- and hence this
-     ;; function -- may return a non-ROSE-NODE.
      (declaim (ftype (function ( rose-node ,type (function (t) fixnum)
                                  (function (t ,type) t))
                                t)

@@ -56,7 +56,7 @@
 
 RULE-SETS can be a symbol naming a single rule set, or a list of such symbols.
 
-Returns the reason for termination: one of :max-iter, :saturate.
+Returns the reason for termination: one of :max-iter, :max-time, :saturate.
 
 If INITIAL-MATCH-LIMIT is non-nil, schedule rules in the style of
 egg's BackoffScheduler.
@@ -71,40 +71,39 @@ this function."
         (ban-times-table (make-hash-table))
         (start-time (get-internal-real-time))
         (rules (mappend #'compiled-rules (ensure-list rule-sets))))
-    (catch 'stop
-      (loop
-        (when (and max-iter (>= n-iter max-iter))
-          (return :max-iter))
-        (when (and max-time (>= (/ (- (get-internal-real-time) start-time)
-                                   internal-time-units-per-second)
-                                max-time))
-          (return :max-time))
-        (when verbose (format t "Iteration ~d: " n-iter))
-        (when verbose (format t "Applying rules... "))
-        (unwind-protect
-             (dolist (rule rules)
-               (let* ((ban-until (gethash rule ban-until-table))
-                      (ban-times (gethash rule ban-times-table 0))
-                      (match-limit (and initial-match-limit
-                                        (ash initial-match-limit ban-times))))
-                 (unless (and ban-until (< n-iter ban-until))
-                   (remhash rule ban-until-table)
-                   (handler-case (funcall rule :match-limit match-limit)
-                     (match-limit-exceeded (c)
-                       (when verbose (format t "~&~a~%" c))
-                       (setf (gethash rule ban-until-table)
-                             (+ n-iter (ash initial-ban-length ban-times)))
-                       (incf (gethash rule ban-times-table 0)))))))
-          (when verbose (format t "Rebuilding... "))
-          (egraph-rebuild :prune-constant prune-constant))
-        (when check (check-egraph))
-        (incf n-iter)
-        (let ((n-enodes-1 (egraph-n-enodes *egraph*))
-              (n-eclasses-1 (egraph-n-eclasses *egraph*)))
-          (when verbose
-            (format t "Done. ~a enodes, ~a eclasses~%" n-enodes-1 n-eclasses-1))
-          (cond ((not (and (= n-enodes n-enodes-1) (= n-eclasses n-eclasses-1)))
-                 (setq n-enodes n-enodes-1 n-eclasses n-eclasses-1))
-                ;; Some rules are still banned, skip till they reactivate
-                ((plusp (hash-table-count ban-until-table)))
-                (t (return :saturate))))))))
+    (loop
+      (when (and max-iter (>= n-iter max-iter))
+        (return :max-iter))
+      (when (and max-time (>= (/ (- (get-internal-real-time) start-time)
+                                 internal-time-units-per-second)
+                              max-time))
+        (return :max-time))
+      (when verbose (format t "Iteration ~d: " n-iter))
+      (when verbose (format t "Applying rules... "))
+      (unwind-protect
+           (dolist (rule rules)
+             (let* ((ban-until (gethash rule ban-until-table))
+                    (ban-times (gethash rule ban-times-table 0))
+                    (match-limit (and initial-match-limit
+                                      (ash initial-match-limit ban-times))))
+               (unless (and ban-until (< n-iter ban-until))
+                 (remhash rule ban-until-table)
+                 (handler-case (funcall rule :match-limit match-limit)
+                   (match-limit-exceeded (c)
+                     (when verbose (format t "~&~a~%" c))
+                     (setf (gethash rule ban-until-table)
+                           (+ n-iter (ash initial-ban-length ban-times)))
+                     (incf (gethash rule ban-times-table 0)))))))
+        (when verbose (format t "Rebuilding... "))
+        (egraph-rebuild :prune-constant prune-constant))
+      (when check (check-egraph))
+      (incf n-iter)
+      (let ((n-enodes-1 (egraph-n-enodes *egraph*))
+            (n-eclasses-1 (egraph-n-eclasses *egraph*)))
+        (when verbose
+          (format t "Done. ~a enodes, ~a eclasses~%" n-enodes-1 n-eclasses-1))
+        (cond ((not (and (= n-enodes n-enodes-1) (= n-eclasses n-eclasses-1)))
+               (setq n-enodes n-enodes-1 n-eclasses n-eclasses-1))
+              ;; Some rules are still banned, skip till they reactivate
+              ((plusp (hash-table-count ban-until-table)))
+              (t (return :saturate)))))))
