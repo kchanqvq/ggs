@@ -179,10 +179,14 @@
     (is (eq (enode-find a) (enode-find b)))))
 
 (defrw* const-fold
-  ((+ (?a) (?b)) (:eval (+ ?a ?b))
-   :guard (and (numberp ?a) (numberp ?b)))
-  ((* (?a) (?b)) (:eval (* ?a ?b))
-   :guard (and (numberp ?a) (numberp ?b))))
+  ((+ (?a) (?b)) :eval
+   (when (and (numberp ?a) (numberp ?b))
+     (let ((?n (+ ?a ?b)))
+       (yield-rewrite (?n)))))
+  ((* (?a) (?b)) :eval
+   (when (and (numberp ?a) (numberp ?b))
+     (let ((?n (* ?a ?b)))
+       (yield-rewrite (?n))))))
 
 (def-test const-fold ()
   (let* ((*egraph* (make-egraph))

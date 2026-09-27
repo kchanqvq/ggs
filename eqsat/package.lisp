@@ -7,7 +7,7 @@
            #:enode-representative-p #:enode-canonical-p #:enode-eclass-info
            #:*egraph* #:enode-find #:enode-merge #:egraph-rebuild #:check-egraph
            #:egraph-n-enodes #:egraph-n-eclasses #:orp #:make-orp
-           #:do-matches #:defrw #:defrw* #:precompile-rule-set #:make-term #:run-rewrites
+           #:do-matches #:defrw #:defrw* #:yield-rewrite #:precompile-rule-set #:make-term #:run-rewrites
            #:define-analysis #:get-analysis-data
            #:build-term #:graph-cost #:tree-cost
            #:greedy-select #:greedy-extract #:lp-select #:lp-extract))

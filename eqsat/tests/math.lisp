@@ -15,14 +15,22 @@
   (not (find 0 (list-enodes enode) :key #'enode-fsym)))
 
 (defrw* const-fold
-  ((+ (?a) (?b)) (:eval (+ ?a ?b))
-   :guard (and (numberp ?a) (numberp ?b)))
-  ((* (?a) (?b)) (:eval (* ?a ?b))
-   :guard (and (numberp ?a) (numberp ?b)))
-  ((- (?a) (?b)) (:eval (- ?a ?b))
-   :guard (and (numberp ?a) (numberp ?b)))
-  ((/ (?a) (?b)) (:eval (/ ?a ?b))
-   :guard (and (numberp ?a) (numberp ?b) (not (= ?b 0)))))
+  ((+ (?a) (?b)) :eval
+   (when (and (numberp ?a) (numberp ?b))
+     (let ((?n (+ ?a ?b)))
+       (yield-rewrite (?n)))))
+  ((* (?a) (?b)) :eval
+   (when (and (numberp ?a) (numberp ?b))
+     (let ((?n (* ?a ?b)))
+       (yield-rewrite (?n)))))
+  ((- (?a) (?b)) :eval
+   (when (and (numberp ?a) (numberp ?b))
+     (let ((?n (- ?a ?b)))
+       (yield-rewrite (?n)))))
+  ((/ (?a) (?b)) :eval
+   (when (and (numberp ?a) (numberp ?b) (not (= ?b 0)))
+     (let ((?n (/ ?a ?b)))
+       (yield-rewrite (?n))))))
 
 (defrw commute-add (+ ?a ?b) (+ ?b ?a))
 (defrw commute-mul (* ?a ?b) (* ?b ?a))

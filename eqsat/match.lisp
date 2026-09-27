@@ -64,13 +64,10 @@ evaluate CONT-EXPR."
 (defun expand-template (tmpl)
   "Generate code that creates an enode according to TMPL (rhs of rewrite rule)."
   (labels ((process (tmpl)
-             (cond ((and (consp tmpl) (eql (car tmpl) :eval))
-                    ;;; FIXME: assumes :eval only result in atoms
-                    `(let ((key-node (vector nil 3 0 ,(cadr tmpl))))
-                       (declare (dynamic-extent key-node))
-                       (intern-enode key-node)))
-                   ((consp tmpl)
-                    `(let ((key-node (vector nil 3 0 ',(car tmpl) ,@(mapcar #'process (cdr tmpl)))))
+             (cond ((consp tmpl)
+                    `(let ((key-node (%make-enode
+                                      :fsym ,(if (var-p (car tmpl)) (car tmpl) `',(car tmpl))
+                                      :args (list ,@(mapcar #'process (cdr tmpl))))))
                        (declare (dynamic-extent key-node))
                        (intern-enode key-node)))
                    ((var-p tmpl) tmpl)

@@ -252,13 +252,13 @@
   (declare ((or null integer) soft-stall max-restart)
            (integer hard-walk soft-walk)
            (single-float beta))
-  (bind ((start-time (get-internal-real-time))
+  (bind (((compute-weights sample-inf-temp sample-fin-temp)
+          (mapcar (curry #'getf (compiled-rule-set rule-set proxy-cost-fn))
+                  '(compute-weights sample-inf-temp sample-fin-temp)))
+         (start-time (get-internal-real-time))
          (end-time (and max-time
                         (+ start-time
                            (* max-time internal-time-units-per-second))))
-         ((compute-weights sample-inf-temp sample-fin-temp)
-          (mapcar (curry #'getf (compiled-rule-set rule-set proxy-cost-fn))
-                  '(compute-weights sample-inf-temp sample-fin-temp)))
          (cost-fn (ensure-function cost-fn))
          (proxy-cost-fn (ensure-function proxy-cost-fn))
          (beta-constant (constant-for-fastexp2 (exp (/ beta 2))))

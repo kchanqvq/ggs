@@ -11,7 +11,7 @@ NODES and PARENTS only store canonical enodes after `egraph-rebuild'."
   (nodes nil :type list)
   ((datum data)))
 
-(define-variadic-structure enode
+(define-variadic-structure (enode (:constructor %make-enode))
   "PARENT is either another enode in the same eclass, or an `eclass-info' if this
 enode is the representative of its own eclass.
 
@@ -173,13 +173,13 @@ CLASS-LIST, N-ECLASSES and FSYM-TABLE are only up-to-date after
     (setf (enode-hash-code key-node) hash)
     ;; Probe with the (dynamic-extent) KEY-NODE; only cons a real enode on miss.
     (or (hash-cons-get key-node hc)
-        (lret ((eclass-info (make-array (+ +eclass-info-data-offset+
-                                           (length (egraph-analysis-info-list *egraph*)))
-                                        :initial-element 'unbound))
+        (lret ((eclass-info (make-eclass-info
+                             :n-parents 0 :parents nil :nodes nil
+                             :n-args (length (egraph-analysis-info-list *egraph*))))
                (enode (copy-seq key-node)))
-          (setf (eclass-info-n-parents eclass-info) 0
-                (eclass-info-parents eclass-info) nil
-                (eclass-info-nodes eclass-info) (list enode)
+          (loop for i of-type fixnum from +eclass-info-data-offset+ below (length eclass-info)
+                do (setf (svref eclass-info i) 'unbound))
+          (setf (eclass-info-nodes eclass-info) (list enode)
                 (enode-parent enode) eclass-info)
           (do-enode-args (arg enode)
             (push enode (eclass-info-parents (enode-parent arg)))
@@ -189,7 +189,7 @@ CLASS-LIST, N-ECLASSES and FSYM-TABLE are only up-to-date after
           (modify-analysis-data enode)))))
 
 (defun make-enode (fsym &rest args)
-  (let ((key-node (apply #'vector nil 3 0 fsym args)))
+  (let ((key-node (%make-enode :fsym fsym :args args)))
     (declare (dynamic-extent key-node))
     (intern-enode key-node)))
 
@@ -241,11 +241,12 @@ CLASS-LIST, N-ECLASSES and FSYM-TABLE are only up-to-date after
         (let ((info (enode-parent enode)))
           (dolist (parent (eclass-info-parents info))
             (when (plusp (enode-canonical-flag parent))
-              (let ((new-class-info (make-array (+ +eclass-info-data-offset+
-                                                   (length (egraph-analysis-info-list *egraph*)))
-                                                :initial-element 'unbound))
+              (let ((new-class-info (make-eclass-info
+                                     :n-args (length (egraph-analysis-info-list *egraph*))))
                     (eclass (enode-find parent)))
                 (declare (dynamic-extent new-class-info))
+                (loop for i of-type fixnum from +eclass-info-data-offset+ below (length new-class-info)
+                      do (setf (svref new-class-info i) 'unbound))
                 (make-analysis-data new-class-info parent)
                 (merge-analysis-data eclass new-class-info)
                 (modify-analysis-data eclass))))))))

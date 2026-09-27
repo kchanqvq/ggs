@@ -6,7 +6,8 @@
 (asdf:defsystem #:ggs/common
   :serial t
   :depends-on (:alexandria
-               :serapeum)
+               :serapeum
+               :metabang-bind)
   :components ((:file "common")))
 
 (asdf:defsystem #:ggs/eqsat
