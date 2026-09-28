@@ -94,7 +94,7 @@ function symbol."
   `(progn
      (setf (gethash ',name *analysis-info-registry*)
            (make-analysis-info :name ',name :make ,make :merge ,merge :modify ,modify))
-     (declaim (inline name))
+     (declaim (inline ,name))
      (defun ,name (enode) (get-analysis-data enode ',name))))
 
 (defstruct (egraph (:constructor make-egraph (&key analyses)))
