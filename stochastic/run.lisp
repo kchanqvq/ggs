@@ -1,7 +1,7 @@
 (in-package :ggs/stochastic)
 
 (declaim (inline fastlog2 fastexp2))
-(serapeum:eval-always
+(eval-always
   (defun fastlog2 (p)
     "Compute log2(P) approximately for *positive* integer P."
     (declare (optimize speed) (fixnum p))
@@ -23,10 +23,10 @@
                   (- (ash 127 23) 366393))))))
 
 (declaim (inline cost))
-(defun cost (cost-fn node)
+(defun cost (cost-fn node offset)
   (if (rose-node-p node)
       (rose-node-cost node)
-      (funcall cost-fn node)))
+      (funcall cost-fn node offset)))
 
 (defconstant +inf-cost+ 100000000)
 (deftype cost () `(integer 0 ,+inf-cost+))
@@ -36,7 +36,7 @@
                                  (member (car policy) '(speed safety)))
                                (cl-environments:declaration-information 'optimize env)))))
 
-(defun compute-rule-set-lambda (rules cost-fn user-decls)
+(defun compute-rule-set-lambda (rules cost-fn user-decls offset)
   (bind (((:flet wrap-user-decls (rule))
           `(,(car rule) (locally (declare ,@user-decls) ,@(cdr rule))))
          ;; Partition rules into that may match compound terms, and may match
@@ -46,15 +46,17 @@
           (remove-if-not (lambda (lhs) (if (consp lhs) (cdr lhs) (var-p lhs)))
                          rules :key #'car))
          (compound-matcher
-           (macroexpand-1 `(do-matches* subject ,@(mapcar #'wrap-user-decls compound-rules))))
+          (macroexpand-1 `(do-matches* (subject ,offset)
+                            ,@(mapcar #'wrap-user-decls compound-rules))))
          (constant-rules
-           (remove-if-not (lambda (lhs)
-                            (or (atom lhs)
-                                (null (cdr lhs))
-                                (and (null (cddr lhs)) (seq-var-p (cadr lhs)))))
-                          rules :key #'car))
+          (remove-if-not (lambda (lhs)
+                           (or (atom lhs)
+                               (null (cdr lhs))
+                               (and (null (cddr lhs)) (seq-var-p (cadr lhs)))))
+                         rules :key #'car))
          (constant-matcher
-           (macroexpand-1 `(do-matches* arg ,@(mapcar #'wrap-user-decls constant-rules)))))
+          (macroexpand-1 `(do-matches*
+                              (arg ,offset) ,@(mapcar #'wrap-user-decls constant-rules)))))
 
     `(compute-weights
       (lambda (subject beta-constant)
@@ -67,14 +69,14 @@
                         (incf (rose-node-weight subject)
                               (fastexp2 (- cost ,(funcall (get ',cost-fn 'expand-cost-fn) rhs))
                                         beta-constant)))))
-          (let ((cost (cost #',cost-fn subject)))
+          (let ((cost (cost #',cost-fn subject ,offset)))
             (declare (type cost cost)
                      (ignorable cost))
             ,compound-matcher)
           ,(when constant-rules
-             `(do-rose-node-args (arg subject)
+             `(do-variadic-slots (arg ,offset subject)
                 (unless (rose-node-p arg)
-                  (let ((cost (,cost-fn arg)))
+                  (let ((cost (,cost-fn arg ,offset)))
                     (declare (type cost cost)
                              (ignorable cost))
                     ,constant-matcher))))))
@@ -89,15 +91,15 @@
                         (decf n-rewrites)
                         (when (minusp n-rewrites)
                           (return-from sample
-                            (context ,(expand-template rhs ',cost-fn)))))))
+                            (context ,(expand-template rhs ',cost-fn ,offset)))))))
           (block sample
             (macrolet ((context (rhs) rhs))
               ,compound-matcher)
             ,(when constant-rules
-               `(do-rose-node-args ((arg i) subject)
+               `(do-variadic-slots ((arg i) ,offset subject)
                   (unless (rose-node-p arg)
                     (macrolet ((context (rhs)
-                                 `(node-replace-arg subject i ,rhs #',',cost-fn)))
+                                 `(node-replace-arg subject i ,rhs #',',cost-fn ,',offset)))
                       ,constant-matcher))))
             subject)))
 
@@ -114,21 +116,21 @@
                                       beta-constant))
                         (when (minusp weight)
                           (return-from sample
-                            (context ,(expand-template rhs ',cost-fn)))))))
+                            (context ,(expand-template rhs ',cost-fn ,offset)))))))
           (block sample
-            (let ((cost (cost #',cost-fn subject)))
+            (let ((cost (cost #',cost-fn subject ,offset)))
               (declare (type cost cost)
                        (ignorable cost))
               (macrolet ((context (rhs) rhs))
                 ,compound-matcher))
             ,(when constant-rules
-               `(do-rose-node-args ((arg i) subject)
+               `(do-variadic-slots ((arg i) ,offset subject)
                   (unless (rose-node-p arg)
-                    (let ((cost (,cost-fn arg)))
+                    (let ((cost (,cost-fn arg ,offset)))
                       (declare (type cost cost)
                                (ignorable cost))
                       (macrolet ((context (rhs)
-                                   `(node-replace-arg subject i ,rhs #',',cost-fn)))
+                                   `(node-replace-arg subject i ,rhs #',',cost-fn ,',offset)))
                         ,constant-matcher)))))
             subject))))))
 
@@ -151,7 +153,7 @@
                       *compiled-rule-sets*)
              (list ,@(collecting
                        (doplist (key lambda (compute-rule-set-lambda
-                                             rules cost-fn user-decls))
+                                             rules cost-fn user-decls +rose-node-args-offset+))
                          (collect `',key)
                          (collect lambda))))))))
 
@@ -162,7 +164,7 @@
                     *compiled-rule-sets*
                     (collecting
                       (doplist (key lambda (compute-rule-set-lambda
-                                            rules cost-fn user-decls))
+                                            rules cost-fn user-decls +rose-node-args-offset+))
                         (collect key)
                         (collect (compile nil lambda)))))))
 
@@ -208,11 +210,13 @@
 
 (defmacro define-tree-sum-cost (name &rest cases)
   `(progn
-     (defun ,name (node)
+     (declaim (inline ,name))
+     (defun ,name (node offset)
+       (declare (fixnum offset))
        (if (rose-node-p node)
            (let ((sum (case (rose-node-fsym node) ,@cases)))
              (declare (cost sum))
-             (do-rose-node-args (arg node)
+             (do-variadic-slots (arg offset node)
                (incf sum (if (rose-node-p arg)
                              (rose-node-cost arg)
                              (case arg ,@cases))))
@@ -222,13 +226,14 @@
        (setf (get ',name 'expand-cost-fn)
              (lambda (tmpl) (expand-tree-sum-cost tmpl ',cases))))))
 
-(defun recompute-rose (node compute-weights beta-constant)
+(defun recompute-rose (node offset compute-weights beta-constant)
   (declare (optimize speed (safety 0))
-           ((function (rose-node fixnum) null) compute-weights))
+           ((function (rose-node fixnum) null) compute-weights)
+           (fixnum offset))
   (labels ((process (node)
              (declare (rose-node node))
              (setf (rose-node-n-rewrites node) 0)
-             (do-rose-node-args (arg node)
+             (do-variadic-slots (arg offset node)
                (when (rose-node-p arg)
                  (when (minusp (rose-node-n-rewrites arg))
                    (process arg))
@@ -263,13 +268,13 @@
          (proxy-cost-fn (ensure-function proxy-cost-fn))
          (beta-constant (constant-for-fastexp2 (exp (/ beta 2))))
          (init-node (term-node term proxy-cost-fn))
-         (init-cost (funcall cost-fn init-node))
+         (init-cost (funcall cost-fn init-node +rose-node-args-offset+))
          (best-term (node-term init-node))
          (best-cost init-cost)
          (n-accepted 0)
          (n-restart 0)
          (cost-history '()))
-    (declare ((function (t) cost) cost-fn proxy-cost-fn))
+    (declare ((function (t fixnum) cost) cost-fn proxy-cost-fn))
     (float-features:with-float-traps-masked t
       ;; Outer loop: restart with different seeds
       (block solve
@@ -291,7 +296,7 @@
                           ;; GET-INTERNAL-REAL-TIME is slow
                           (and end-time (zerop (mod i 1024)) (>= (get-internal-real-time) end-time)))
                   (return-from solve))
-                (recompute-rose node compute-weights beta-constant)
+                (recompute-rose node +rose-node-args-offset+ compute-weights beta-constant)
 
                 ;; FIXME: a constant top-level NODE might still be rewritable,
                 ;; although this probably is not usually useful.
@@ -303,18 +308,18 @@
                        (decf n-walk)
                        (setq node
                              (search-rewrite-n-rewrites
-                              node (random (rose-node-n-rewrites node))
+                              node +rose-node-args-offset+ (random (rose-node-n-rewrites node))
                               proxy-cost-fn sample-inf-temp)))
                       (t
                        (setq node
                              (search-rewrite-weight
-                              node (random (rose-node-weight node))
+                              node +rose-node-args-offset+ (random (rose-node-weight node))
                               proxy-cost-fn
                               (lambda (subject weight)
                                 (funcall sample-fin-temp subject weight beta-constant))))))
 
                 (incf n-accepted)
-                (let ((cost (funcall cost-fn node)))
+                (let ((cost (funcall cost-fn node +rose-node-args-offset+)))
                   ;; Check for cost function decrease
                   (if (< cost best-cost-1)
                       (progn

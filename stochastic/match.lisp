@@ -21,17 +21,17 @@ everything else and bind ?VAR."
             (bind-forms `(progn ,@bind-forms))
             (real-cases `(case ,keyform ,@real-cases))))))
 
-(declaim (inline rose-node-arg-between rose-node-arg-from-end))
-(defun rose-node-arg-between (from-start from-end node)
-  (loop for i from (+ +rose-node-args-offset+ from-start)
+(declaim (inline variadic-slots-between variadic-slot-from-end))
+(defun variadic-slots-between (from-start from-end offset node)
+  (loop for i from (+ offset from-start)
           to (- (length node) from-end)
         collect (svref node i)))
-(defun rose-node-arg-from-end (from-end node)
+(defun variadic-slot-from-end (from-end node)
   (svref node (- (length node) from-end)))
 
 (lp-hash-table:define-hash-table ordered-table sxhash equal :optimize ())
 
-(defun expand-match (var-list pat-mat)
+(defun expand-match (offset var-list pat-mat)
   (unless var-list
     (return-from expand-match
       (mapcar #'serapeum:only-elt pat-mat)))
@@ -82,34 +82,34 @@ everything else and bind ?VAR."
                    (seq-var-pos (cadr arity-info)))
               (when (> n-args 0)
                 (push `(when ,(if seq-var-pos
-                                  `(>= (rose-node-n-args ,var) ,(1- n-args))
-                                  `(= (rose-node-n-args ,var) ,n-args))
+                                  `(>= (n-variadic-slots ,offset ,var) ,(1- n-args))
+                                  `(= (n-variadic-slots ,offset ,var) ,n-args))
                          (let ,(mapcar
                                 (lambda (i arg-var)
                                   (case (if seq-var-pos (signum (- i seq-var-pos)) -1)
-                                    (-1 `(,arg-var (rose-node-arg ,i ,var)))
-                                    (0 `(,arg-var (rose-node-arg-between ,i ,(- n-args i) ,var)))
-                                    (1 `(,arg-var (rose-node-arg-from-end ,(- n-args i) ,var)))))
+                                    (-1 `(,arg-var (get-variadic-slot ,i ,offset ,var)))
+                                    (0 `(,arg-var (variadic-slots-between ,i ,(- n-args i) ,offset ,var)))
+                                    (1 `(,arg-var (variadic-slot-from-end ,(- n-args i) ,var)))))
                                 (iota n-args) arg-vars)
-                           ,@(expand-match
-                              (append arg-vars (cdr var-list))
-                              (mapcar (lambda (pat-row)
-                                        (append (cdar pat-row) (cdr pat-row)))
-                                      pat-rows))))
+                           ,@(expand-match offset
+                                           (append arg-vars (cdr var-list))
+                                           (mapcar (lambda (pat-row)
+                                                     (append (cdar pat-row) (cdr pat-row)))
+                                                   pat-rows))))
                       compound-clauses-1))
               (when (= n-args 0)
                 (nconcf constant-clauses-1
-                        (expand-match
-                         (cdr var-list)
-                         (mapcar #'cdr pat-rows))))
+                        (expand-match offset
+                                      (cdr var-list)
+                                      (mapcar #'cdr pat-rows))))
               ;; Single SEQ-VAR matches constant and binds to NIL
               (when (and (= n-args 1) (eql seq-var-pos 0))
                 (nconcf constant-clauses-1
-                        (expand-match
-                         (cons nil (cdr var-list))
-                         (mapcar (lambda (pat-row)
-                                   (append (cdar pat-row) (cdr pat-row)))
-                                 pat-rows))))))
+                        (expand-match offset
+                                      (cons nil (cdr var-list))
+                                      (mapcar (lambda (pat-row)
+                                                (append (cdar pat-row) (cdr pat-row)))
+                                              pat-rows))))))
           arity-groups)
          (when compound-clauses-1
            (push `((,fsym) ,@compound-clauses-1) compound-clauses))
@@ -117,17 +117,17 @@ everything else and bind ?VAR."
            (push `((,fsym) ,@constant-clauses-1) constant-clauses))))
      groups)
     (append
-     (expand-match
-      (cdr var-list)
-      (mapcar (lambda (pat-row)
-                (subst-row var (car pat-row) (cdr pat-row)))
-              bind-rows))
+     (expand-match offset
+                   (cdr var-list)
+                   (mapcar (lambda (pat-row)
+                             (subst-row var (car pat-row) (cdr pat-row)))
+                           bind-rows))
      (when (or constant-clauses compound-clauses)
        `((if (rose-node-p ,var)
              (case/bind (rose-node-fsym ,var) ,@compound-clauses)
              (case/bind ,var ,@constant-clauses)))))))
 
-(defun expand-template (tmpl cost-fn)
+(defun expand-template (tmpl cost-fn offset)
   (labels ((process (tmpl)
              (cond
                ((consp tmpl)
@@ -141,25 +141,28 @@ everything else and bind ?VAR."
                                                (cdr tmpl)))))
                   `(if ,(if (find-if-not #'seq-var-p (cdr tmpl)) t `(or ,@(cdr tmpl)))
                        (let ((new-node (make-rose-node :fsym ,fsym :args ,args)))
-                         (setf (rose-node-cost new-node) (,cost-fn new-node))
+                         (setf (rose-node-cost new-node) (,cost-fn new-node ,offset))
                          new-node)
                        ,fsym)))
                ((var-p tmpl) tmpl)
                (t `',tmpl))))
     (process tmpl)))
 
-(defun node-equal (x y)
+(defun node-equal (x y offset)
   (labels ((process (x y)
              (cond
+               ((eq x y) t)
                ((and (not (rose-node-p x)) (not (rose-node-p y))) (eql x y))
                ((and (rose-node-p x) (rose-node-p y))
                 (unless (= (length x) (length y))
-                  (return-from node-equal nil))
-                (loop for i from (1- +rose-node-args-offset+) below (length x)
-                      always (node-equal (svref x i) (svref y i)))))))
+                  (return-from process nil))
+                (unless (eql (rose-node-fsym x) (rose-node-fsym y))
+                  (return-from process nil))
+                (loop for i from offset below (length x)
+                      always (process (svref x i) (svref y i)))))))
     (process x y)))
 
-(defun decompose-consistency-check (pat cont-expr)
+(defun decompose-consistency-check (pat offset cont-expr)
   (let (vars checks)
     (labels ((process (pat)
                (cond ((consp pat)
@@ -168,7 +171,7 @@ everything else and bind ?VAR."
                      ((var-p pat)
                       (if (member pat vars)
                           (let ((new-var (gensym-1 pat)))
-                            (push `(node-equal ,pat ,new-var) checks)
+                            (push `(node-equal ,pat ,new-var ,offset) checks)
                             new-var)
                           (progn
                             (push pat vars)
@@ -178,11 +181,11 @@ everything else and bind ?VAR."
               `(when (and ,@checks)
                  ,cont-expr)))))
 
-(defmacro do-matches* (top-node-var &body clauses)
-  `(progn ,@(expand-match
-             (list top-node-var)
-             (mapcar (lambda (clause)
-                       (bind (((pat . body) clause))
-                             (multiple-value-list
-                              (decompose-consistency-check pat `(progn ,@body)))))
-                     clauses))))
+(defmacro do-matches* ((top-node-var offset) &body clauses)
+  `(progn ,@(expand-match offset
+                          (list top-node-var)
+                          (mapcar (lambda (clause)
+                                    (bind (((pat . body) clause))
+                                      (multiple-value-list
+                                       (decompose-consistency-check pat offset `(progn ,@body)))))
+                                  clauses))))

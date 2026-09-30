@@ -3,9 +3,27 @@
   (:import-from #:serapeum #:with-collector #:string-prefix-p #:eval-always #:-> #:partition)
   (:import-from #:metabang-bind #:bind)
   (:export #:define-variadic-structure
+           #:do-variadic-slots #:n-variadic-slots #:get-variadic-slot
            #:var-p #:seq-var-p #:gensym-1 #:get-rules #:defrw #:defrw* #:yield-rewrite))
 
 (in-package :ggs/common)
+
+(defmacro do-variadic-slots ((slot-var offset variadic-structure &optional result) &body body)
+  (destructuring-bind (slot-var &optional index-var) (ensure-list slot-var)
+    (once-only (variadic-structure)
+      (with-gensyms (i)
+        `(loop for ,i from ,offset below (length ,variadic-structure)
+               ,@(when index-var `(for ,index-var of-type fixnum from 0))
+               do (let ((,slot-var (svref ,variadic-structure ,i)))
+                    ,@body)
+               finally (return ,result))))))
+
+(declaim (inline n-variadic-slots))
+(defun n-variadic-slots (offset variadic-structure)
+  (- (length variadic-structure) offset))
+
+(defmacro get-variadic-slot (i offset variadic-structure)
+  `(svref ,variadic-structure (+ ,i ,offset)))
 
 (defun expand-make (args fixed offset)
   (labels ((items (form)
@@ -46,10 +64,19 @@
           `(vector ,@fixed ,@(mapcar #'second items))))))
 
 (defmacro define-variadic-structure (name-and-options &body slot-and-options)
+  "Supports :INCLUDE, child structures inherits all slots *except* the variadic
+slot. To access variadic slot generically, caller need to know the exact structure
+type at runtime, and pass in the corresponding offset using GET-VARIADIC-SLOT and
+alike"
   (bind (((name . options) (ensure-list name-and-options))
          (doc (and (stringp (car slot-and-options)) (pop slot-and-options)))
          (slot-and-options (mapcar #'ensure-list slot-and-options))
-         (ordinary-slots (mapcar #'ensure-list (butlast slot-and-options)))
+         (include (cadr (assoc :include options)))
+         (own-slots (mapcar #'ensure-list (butlast slot-and-options)))
+         (ordinary-slots (append (when include
+                                   (or (get include 'variadic-structure-slots)
+                                       (error "~S is not a variadic structure." include)))
+                                 own-slots))
          (last-slot (lastcar slot-and-options))
          (singular (if (listp (car last-slot)) (caar last-slot) (car last-slot)))
          (plural (if (listp (car last-slot)) (cadar last-slot) (format nil "~aS" (car last-slot))))
@@ -66,9 +93,12 @@
     (assert make)
     `(progn
        (declaim (inline ,predicate ,make ,map-args ,n-args ,get-arg))
-       (defstruct (,name (:type vector) (:constructor nil))
+       (defstruct (,name (:type vector) (:constructor nil)
+                         ,@(when include `((:include ,include))))
          ,@(and doc (list doc))
-         ,@ordinary-slots)
+         ,@own-slots)
+       (eval-always
+         (setf (get ',name 'variadic-structure-slots) ',ordinary-slots))
        (defconstant ,offset-const ,(length ordinary-slots))
        (deftype ,name (&optional n)
          (cond ((eq n '*) 'simple-vector)
@@ -98,22 +128,14 @@
              (expand-make args (list ,@(mapcar #'car ordinary-slots)) ,offset-const)
              form))
        (defmacro ,do-args ((,arg-var ,name-var &optional result) &body body)
-         (destructuring-bind (,arg-var &optional index-var) (ensure-list ,arg-var)
-           (once-only (,name-var)
-             (with-gensyms (i)
-               `(loop for ,i from ,,offset-const below (length ,,name-var)
-                      ,@(when index-var `(for ,index-var of-type fixnum from 0))
-                      do (let ((,,arg-var (svref ,,name-var ,i)))
-                           ,@body)
-                      finally (return ,result))))))
+         `(do-variadic-slots (,,arg-var ,',offset-const ,,name-var ,result) ,@body))
        (defun ,map-args (function ,name)
          (with-collector (collect)
            (,do-args (arg ,name)
              (collect (funcall function arg)))))
-       (defun ,n-args (,name)
-         (- (length ,name) ,offset-const))
+       (defun ,n-args (,name) (n-variadic-slots ,offset-const ,name))
        (defmacro ,get-arg (i ,name)
-         `(svref ,,name (+ ,i ,',offset-const))))))
+         `(get-variadic-slot ,i ,',offset-const ,,name)))))
 
 (defun var-p (object)
   (and (symbolp object) (string-prefix-p "?" (symbol-name object))))
