@@ -1,0 +1,31 @@
+#+TITLE: GGS: Rewrite-based Optimizations
+* Example
+Define a simple problem:
+#+BEGIN_SRC lisp
+  (use-package :ggs/stochastic)
+
+  ;; A ruleset is a named list of (LHS RHS [:guard CONDITION]) clauses.
+  ;; ?x are pattern variables.
+  (defrw* cancel
+    ((+ (- ?a) ?a) 0)
+    ((+ ?a ?b) (+ ?b ?a))
+    ((+ (+ ?a ?b) ?c) (+ ?a (+ ?b ?c)))
+    ((+ ?a (+ ?b ?c)) (+ (+ ?a ?b) ?c))
+    ((+ ?a 0) ?a))
+
+  ;; Cost = 1 per symbol (a CASE over function symbols / constants; T is the default).
+  (define-tree-sum-cost ast-size (t 1))
+#+END_SRC
+
+Solve an instance:
+#+BEGIN_SRC
+CL-USER> (stochastic-search '(+ (+ (- x) (+ y (- x))) (+ (- y) x)) 'cancel 'ast-size
+                            :max-time 1 :verbose t)
+Iteration 0/11 found 9 (+ (- X) (+ (- Y) (+ Y 0)))
+Iteration 0/13 found 7 (+ (+ (- Y) Y) (- X))
+Iteration 0/14 found 4 (+ 0 (- X))
+Iteration 0/16 found 2 (- X)
+2                               ; three return values, first the best cost
+(- X)                           ; then the best term
+(:N-ACCEPTED 17 :N-RESTART 1)   ; finally additional information
+#+END_SRC

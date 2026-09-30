@@ -153,9 +153,27 @@ alike"
     rules))
 
 (defmacro defrw (name &rest rule)
+  "Define ruleset NAME consisting of a single RULE.
+
+Equivalent to (DEFRW* NAME RULE), See DEFRW* for rule format."
   `(defrw* ,name ,rule))
 
 (defmacro defrw* (name &body rules)
+  "Define ruleset NAME consisting of RULES.
+
+Each RULE can be either:
+
+- A symbol that names another ruleset. It will be included in NAME.
+
+- A list of form (LHS RHS [:guard CONDITION]). This defines a rule that match
+  LHS pattern and rewrite to RHS, if CONDITION evaluates to true.
+
+- A list of form (LHS :eval BODY...). This defines a rule that match LHS pattern
+  and evaluate BODY for each match. BODY may use YIELD-REWRITE to yield
+  candidate rewrites, potentially multiple times.
+
+The rule (lhs rhs :guard condition) is equivalent to the :EVAL rule
+\(lhs :eval (when condition (yield-rewrite rhs)))."
   (labels ((canonicalize (rule)
              (cond ((symbolp rule) rule)
                    ((eql (cadr rule) :eval)
@@ -165,3 +183,7 @@ alike"
                       `(,(car rule)
                         (when ,guard (yield-rewrite ,rhs))))))))
     `(eval-always (setf (get ',name 'rules) ',(mapcar #'canonicalize rules)))))
+
+(defmacro yield-rewrite (rhs)
+  "Inside :EVAL rules, yield a candidate rewrite with RHS as template."
+  (error "YIELD-REWRITE must be used in :EVAL rules in DEFRW/DEFRW*."))

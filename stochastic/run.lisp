@@ -209,6 +209,14 @@
                          coefficients)))))))
 
 (defmacro define-tree-sum-cost (name &rest cases)
+  "Define NAME as a tree sum cost function that can be supplied to
+STOCHASTIC-SEARCH.
+
+CASES is like clauses to CASE, e.g.
+\(define-tree-sum-cost my-cost
+   ((+ -) 1)
+   (* 5)
+   (/ 20))"
   `(progn
      (declaim (inline ,name))
      (defun ,name (node offset)
