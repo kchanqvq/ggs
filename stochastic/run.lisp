@@ -302,7 +302,8 @@ CASES is like clauses to CASE, e.g.
                 (when (or (car finish-flag)
                           ;; Check time every 1024 iters, because
                           ;; GET-INTERNAL-REAL-TIME is slow
-                          (and end-time (zerop (mod i 1024)) (>= (get-internal-real-time) end-time)))
+                          (and end-time (zerop (mod i 1024)) (>= (get-internal-real-time) end-time))
+                          (and max-restart (>= seed-1 (+ seed max-restart))))
                   (return-from solve))
                 (recompute-rose node +rose-node-args-offset+ compute-weights beta-constant)
 
@@ -333,7 +334,7 @@ CASES is like clauses to CASE, e.g.
                       (progn
                         (when verbose
                           (format t "~&Iteration ~a/~a found ~a ~a~%"
-                                  seed i cost (node-term node)))
+                                  seed-1 i cost (node-term node)))
                         (setq best-cost-1 cost
                               n-stall 0)
                         (when (< cost best-cost)
@@ -361,11 +362,8 @@ CASES is like clauses to CASE, e.g.
                                (< cost +inf-cost+))
                     (when verbose
                       (format t "~&Iteration ~a/~a restart ~a ~a~%"
-                              seed i cost (node-term node)))
-                    (return))
-
-                  (when (and max-restart (>= seed-1 (+ seed max-restart)))
-                    (return-from solve)))))))))
+                              seed-1 i cost (node-term node)))
+                    (return)))))))))
     (values best-cost best-term
             `( :n-accepted ,n-accepted :n-restart ,n-restart
                ,@(when save-cost-history `(:cost-history ,(nreverse cost-history)))))))
