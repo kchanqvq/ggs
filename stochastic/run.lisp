@@ -55,8 +55,8 @@
                                (and (null (cddr lhs)) (seq-var-p (cadr lhs)))))
                          rules :key #'car))
          (constant-matcher
-          (macroexpand-1 `(do-matches*
-                              (arg ,offset) ,@(mapcar #'wrap-user-decls constant-rules)))))
+          (macroexpand-1 `(do-matches* (arg ,offset)
+                            ,@(mapcar #'wrap-user-decls constant-rules)))))
 
     `(compute-weights
       (lambda (subject beta-constant)
@@ -91,7 +91,8 @@
                         (decf n-rewrites)
                         (when (minusp n-rewrites)
                           (return-from sample
-                            (context ,(expand-template rhs ',cost-fn ,offset)))))))
+                            (values (context ,(expand-template rhs ',cost-fn ,offset))
+                                    %current-ruleset%))))))
           (block sample
             (macrolet ((context (rhs) rhs))
               ,compound-matcher)
@@ -116,7 +117,8 @@
                                       beta-constant))
                         (when (minusp weight)
                           (return-from sample
-                            (context ,(expand-template rhs ',cost-fn ,offset)))))))
+                            (values (context ,(expand-template rhs ',cost-fn ,offset))
+                                    %current-ruleset%))))))
           (block sample
             (let ((cost (cost #',cost-fn subject ,offset)))
               (declare (type cost cost)
@@ -138,7 +140,11 @@
   (mapcan (lambda (rule)
             (if (symbolp rule)
                 (get-rules-resolve-symbols rule)
-                (list rule)))
+                ;; Also annotate what ruleset it comes from, for
+                ;; :SAVE-FULL-HISTORY
+                (list `(,(car rule)
+                        (symbol-macrolet ((%current-ruleset% ',name))
+                          ,@(cdr rule))))))
           (get-rules name)))
 
 (defvar *compiled-rule-sets* (make-hash-table :test 'equal))
@@ -255,13 +261,13 @@ CASES is like clauses to CASE, e.g.
         (process node)))))
 
 (defun stochastic-search-1
-    (term rule-set cost-fn
+    (init-term rule-set cost-fn
      &key (finish-flag (list nil)) (seed 0) (stride 1)
        (beta 2.0)
        (soft-walk 0) (soft-stall nil) (hard-walk soft-walk) (max-stall 16000)
        (target-cost 0) max-time (max-restart 64)
        (proxy-cost-fn cost-fn)
-       verbose save-cost-history)
+       verbose save-cost-history save-full-history)
   (declare ((or null integer) soft-stall max-restart)
            (integer hard-walk soft-walk)
            (single-float beta))
@@ -275,13 +281,30 @@ CASES is like clauses to CASE, e.g.
          (cost-fn (ensure-function cost-fn))
          (proxy-cost-fn (ensure-function proxy-cost-fn))
          (beta-constant (constant-for-fastexp2 (exp (/ beta 2))))
-         (init-node (term-node term proxy-cost-fn))
+         (last-fired-ruleset nil) ; recorded for :SAVE-FULL-HISTORY
+         (inf-sampler (if save-full-history
+                          (lambda (subject n-rewrites)
+                            (multiple-value-bind (result ruleset)
+                                (funcall sample-inf-temp subject n-rewrites)
+                              (setq last-fired-ruleset ruleset)
+                              result))
+                          sample-inf-temp))
+         (fin-sampler (if save-full-history
+                          (lambda (subject weight)
+                            (multiple-value-bind (result ruleset)
+                                (funcall sample-fin-temp subject weight beta-constant)
+                              (setq last-fired-ruleset ruleset)
+                              result))
+                          (lambda (subject weight)
+                            (funcall sample-fin-temp subject weight beta-constant))))
+         (init-node (term-node init-term proxy-cost-fn))
          (init-cost (funcall cost-fn init-node +rose-node-args-offset+))
          (best-term (node-term init-node))
          (best-cost init-cost)
          (n-accepted 0)
          (n-restart 0)
-         (cost-history '()))
+         (cost-history '())
+         (full-history '()))
     (declare ((function (t fixnum) cost) cost-fn proxy-cost-fn))
     (float-features:with-float-traps-masked t
       ;; Outer loop: restart with different seeds
@@ -297,6 +320,9 @@ CASES is like clauses to CASE, e.g.
                  (n-walk hard-walk))
             (declare (integer n-accepted n-restart n-stall n-stall-soft n-walk))
             (incf n-restart)
+            (when save-full-history
+              (push (nreverse (list :seed seed-1 (list :term init-term :cost init-cost)))
+                    full-history))
             (loop for i of-type fixnum from 0 do
               (progn
                 (when (or (car finish-flag)
@@ -318,17 +344,18 @@ CASES is like clauses to CASE, e.g.
                        (setq node
                              (search-rewrite-n-rewrites
                               node +rose-node-args-offset+ (random (rose-node-n-rewrites node))
-                              proxy-cost-fn sample-inf-temp)))
+                              proxy-cost-fn inf-sampler)))
                       (t
                        (setq node
                              (search-rewrite-weight
                               node +rose-node-args-offset+ (random (rose-node-weight node))
-                              proxy-cost-fn
-                              (lambda (subject weight)
-                                (funcall sample-fin-temp subject weight beta-constant))))))
+                              proxy-cost-fn fin-sampler))))
 
                 (incf n-accepted)
                 (let ((cost (funcall cost-fn node +rose-node-args-offset+)))
+                  (when save-full-history
+                    (push (list :term (node-term node) :cost cost :ruleset last-fired-ruleset)
+                          (car full-history)))
                   ;; Check for cost function decrease
                   (if (< cost best-cost-1)
                       (progn
@@ -366,7 +393,8 @@ CASES is like clauses to CASE, e.g.
                     (return)))))))))
     (values best-cost best-term
             `( :n-accepted ,n-accepted :n-restart ,n-restart
-               ,@(when save-cost-history `(:cost-history ,(nreverse cost-history)))))))
+               ,@(when save-cost-history `(:cost-history ,(nreverse cost-history)))
+               ,@(when save-full-history `(:full-history ,(nreverse (mapcar #'nreverse full-history))))))))
 
 (defun merge-cost-history (st1 st2)
   "Merge two time-ordered (TIME COST) lists, keeping only strict improvements."
@@ -385,12 +413,16 @@ CASES is like clauses to CASE, e.g.
 (defun reduce-stochastic-result (results-1 results-2)
   (bind (((bc1 bt1 plist1) results-1)
          ((bc2 bt2 plist2) results-2)
-         ((:plist (na1 :n-accepted) (nr1 :n-restart) (st1 :cost-history 'unbound)) plist1)
-         ((:plist (na2 :n-accepted) (nr2 :n-restart) (st2 :cost-history 'unbound)) plist2))
+         ((:plist (na1 :n-accepted) (nr1 :n-restart) (st1 :cost-history 'unbound) (fh1 :full-history 'unbound))
+          plist1)
+         ((:plist (na2 :n-accepted) (nr2 :n-restart) (st2 :cost-history 'unbound) (fh2 :full-history 'unbound))
+          plist2))
     `(,@(if (< bc1 bc2) (list bc1 bt1) (list bc2 bt2))
       ( :n-accepted ,(+ na1 na2) :n-restart ,(+ nr1 nr2)
         ,@(unless (eq st1 'unbound)
-            `(:cost-history ,(merge-cost-history st1 st2)))))))
+            `(:cost-history ,(merge-cost-history st1 st2)))
+        ,@(unless (eq fh1 'unbound)
+            `(:full-history ,(sort (nconc fh1 fh2) #'< :key (lambda (h) (getf h :seed)))))))))
 
 (defun worker-loop ()
   (with-standard-io-syntax
@@ -408,12 +440,12 @@ CASES is like clauses to CASE, e.g.
                             (soft-walk 0) (soft-stall nil) (hard-walk soft-walk) (max-restart 64)
                             (target-cost 0) max-time (max-stall 16000)
                             (proxy-cost-fn cost-fn)
-                            verbose save-cost-history
+                            verbose save-cost-history save-full-history
                             (nproc 1) workers)
   (declare (ignore beta
                    max-stall max-restart soft-stall hard-walk
                    target-cost max-time
-                   verbose save-cost-history))
+                   verbose save-cost-history save-full-history))
   (cond (workers
          (let ((n-workers (length workers)))
            (multiple-value-bind (nproc rem) (floor nproc n-workers)
