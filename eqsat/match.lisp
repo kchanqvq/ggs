@@ -53,20 +53,23 @@ evaluate CONT-EXPR."
         (cond (fsym-var-p
                (assert lhs-bound-p)
                `(dolist (%entry (eclass-info-fsym-index (enode-class-info ,var)))
-                  (dolist (,node-var (cdr %entry))
-                    ,body)))
+                  (dolist (,node-var (cdr %entry)) ,body)))
               (lhs-bound-p
                `(dolist (,node-var (assoc-value (eclass-info-fsym-index (enode-class-info ,var))
                                                 ',fsym))
                   ,body))
-              (t `(dolist (,node-var (gethash ',fsym (egraph-fsym-index *egraph*)))
-                    ,body))))
+              (t `(dolist (%list (gethash ',fsym (egraph-fsym-index *egraph*)))
+                    (dolist (,node-var %list) ,body)))))
       cont-expr))
 
 (defun expand-template (tmpl &optional into)
   "Generate code that creates an enode according to TMPL (rhs of rewrite rule).
 If INTO is non-nil, the created enode is merged into eclass INTO\; otherwise it
-is returned."
+is returned.
+
+We pass INTO here instead of fuse `merge-node' with code that returns the
+created enode because we want to stack allocate the enode and call
+`%intern-merge-enode' within its dynamic extent."
   (labels ((process (tmpl into)
              (cond ((consp tmpl)
                     `(let ((key-node (%make-enode

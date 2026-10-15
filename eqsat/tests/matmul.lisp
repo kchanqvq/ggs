@@ -71,3 +71,18 @@
           (is (= 36069 (egraph-n-enodes *egraph*)))
           (is (= 30764 (cost a))))))
     (benchmark:report timer)))
+
+(def-test bench.matmul-plain (:suite :ggs/eqsat/bench)
+  "Like `bench.matmul' without analyses, on a longer chain."
+  (let ((timer (make-instance 'benchmark:timer)))
+    (loop for i from 1 to 5 do
+      (let ((*egraph* (make-egraph)))
+        (format t "~&Benchmark run ~a." i)
+        (trivial-garbage:gc :full t)
+        (make-term (make-matmul-term (bench-matmul-dims 80)))
+        (egraph-rebuild)
+        (benchmark:with-sampling (timer)
+          (is (eq :saturate (run-rewrites '(assoc-matmul -assoc-matmul)))))
+        (is (= 3258 (egraph-n-eclasses *egraph*)))
+        (is (= 85418 (egraph-n-enodes *egraph*)))))
+    (benchmark:report timer)))

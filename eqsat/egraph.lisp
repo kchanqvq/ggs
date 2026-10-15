@@ -16,12 +16,36 @@ store canonical enodes after `egraph-rebuild'."
   (fsym-index nil :type list)
   ((datum data)))
 
+;; Right now, we use vector representation for variadic structure that
+;; internally pays 2 word overhead. Because SBCL double-word align objects, it
+;; doesn't hurt to store an extra `class-info' to make 0/2-ary node (the most
+;; common) have even number of slots -- it is free.
+;;
+;; I could abuse regular structure for variadic structure by setting a longer
+;; `sb-kernel:%instance-length'. This has 1 word instead of 2 word overhead.
+;; However, GC seems to scan it slower than `simple-vector'.
+;;
+;; In the future, if we go that route, it would be better to have an odd number
+;; of slots. Ideas saved for that future:
+;;
+;; - Put real representative `class-info' on `parent', then Store merged-away
+;; `class-info' in a separate EQ hash-table. This is often cheaper than you
+;; would think because merged away eclass makes up a small portion.
+;;
+;; - Put both real and merged-away `class-info' on `parent'. In that case
+;; we would want to path compress across merged-away `class-info' because
+;; otherwise even regular enode pays for the longer path. Therefore, make
+;; `class-info' have a parent pointer, and make it look like:
+;;
+;; merged-away-eclass -> class-info -> other-enode -> ... -> real-eclass-> class-info
+;; other-enode -------------------------^
+
 (define-variadic-structure (enode (:constructor %make-enode))
   "CLASS-INFO is the `eclass-info' of a representative enode. A representative
 merged away since the last `egraph-rebuild' keeps its CLASS-INFO, for matches to
 see its FSYM-INDEX.
 
-FLAGS packs `enode-hash-code' above +ENODE-FLAG-BITS+ flag bits.
+FLAGS packs `enode-hash-code' above `+enode-flag-bits+' flag bits.
 
 Set CANONICAL-FLAG to NIL to mark the node as non-canonical. `egraph-rebuild'
 trusts this information to avoid testing all term arguments for
@@ -79,7 +103,8 @@ representativeness."
     (ldb (byte +enode-hash-bits+ 0) hash)))
 
 (declaim (inline hash-cons-get hash-cons-put))
-(lp-hash-table:define-hash-set hash-cons enode-hash-code term-equal)
+(lp-hash-table:define-hash-set hash-cons enode-hash-code term-equal
+  :optimize (speed (safety 0)))
 
 (-> %enode-find (enode) enode)
 (defun %enode-find (enode)
@@ -121,7 +146,9 @@ representativeness."
 (defstruct (egraph (:constructor make-egraph (&key analyses)))
   "HASH-CONS stores all canonical enodes. CLASS-LIST lists all
 eclass (i.e. representative enodes) and N-ECLASSES is its length. FSYM-INDEX
-maps every function symbol to all enodes with it.
+maps every function symbol to a list of lists containing all enodes with it
+(it is represented as a list of lists just to share structure with
+`class-info-fsym-index', conceptually it stands for the flattened list).
 
 CLASS-LIST, N-ECLASSES and FSYM-INDEX are only up-to-date after
 `egraph-rebuild'."
@@ -176,7 +203,8 @@ CLASS-LIST, N-ECLASSES and FSYM-INDEX are only up-to-date after
 (declaim (inline canonicalize-key-node))
 (defun canonicalize-key-node (key-node)
   (do-enode-args ((arg i) key-node)
-    (setf (enode-arg i key-node) (enode-find arg)))
+    (unless (enode-representative-p arg)
+      (setf (enode-arg i key-node) (%enode-find arg))))
   ;; Key nodes are canonical, with no other flag
   (setf (enode-hash-code-and-flags key-node)
         (logior (ash (term-hash key-node) +enode-flag-bits+) 1)))
@@ -256,10 +284,11 @@ interned."
                  (eclass-info-n-parents py))
           (rotatef x y)
           (rotatef px py))
-        (dolist (parent (eclass-info-parents py))
-          (when (plusp (enode-canonical-flag parent))
-            (setf (enode-canonical-flag parent) 0)
-            (push parent (egraph-work-list *egraph*))))
+        (let ((g *egraph*))
+          (dolist (parent (eclass-info-parents py))
+            (when (plusp (enode-canonical-flag parent))
+              (setf (enode-canonical-flag parent) 0)
+              (push parent (egraph-work-list g)))))
         (setf (eclass-info-nodes px)
               (nreconc (eclass-info-nodes py) (eclass-info-nodes px))
               (enode-parent y) x)
@@ -360,8 +389,7 @@ interned."
             (push node (cdr entry))))
         (setf (eclass-info-fsym-index info) alist)
         (loop for (fsym . nodes) in alist
-              do (setf (gethash fsym fsym-index)
-                       (append nodes (gethash fsym fsym-index))))))))
+              do (push nodes (gethash fsym fsym-index)))))))
 
 ;;; Utils
 
