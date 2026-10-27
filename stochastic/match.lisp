@@ -16,30 +16,29 @@
 
 (lp-hash-table:define-hash-table ordered-table sxhash equal :optimize ())
 
-(defun expand-match (offset var-list pat-mat)
-  (unless var-list
+(defun expand-match (offset subject-list pat-mat)
+  (unless subject-list
     (return-from expand-match
       (mapcar #'serapeum:only-elt pat-mat)))
   ;; pattern column selection heuristics
   (when pat-mat
     (setq pat-mat (copy-tree pat-mat)
-          var-list (copy-list var-list))
+          subject-list (copy-list subject-list))
     (let* ((columns (butlast (apply #'mapcar #'list pat-mat)))
            (column-n-tested (mapcar (lambda (c)
                                       (count-if-not #'var-p (mapcar #'ensure-car c)))
                                     columns))
            (selected (position (reduce #'max column-n-tested)
                                column-n-tested)))
-      (rotatef (car var-list) (nth selected var-list))
+      (rotatef (car subject-list) (nth selected subject-list))
       (mapc (lambda (row)
               (rotatef (car row) (nth selected row)))
             pat-mat)))
+
   ;; GROUPS is a two-level hash table: FSYM -> (N-ARGS SEQ-VAR-POS) -> CLAUSES.
   (let ((groups (make-ordered-table))
-        (var (car var-list))
-        bind-rows
-        compound-clauses
-        constant-clauses)
+        (subject (car subject-list))
+        bind-rows compound-clauses constant-clauses)
     (macrolet ((push-to-group (row fsym arity-info)
                  `(let ((table (or (ordered-table-get ,fsym groups)
                                    (ordered-table-put ,fsym  (make-ordered-table) groups))))
@@ -52,14 +51,11 @@
                               (find-if #'seq-var-p (cdr pat) :start (1+ seq-var-pos)))
                      (error "Multiple sequence variables in ~A." pat))
                    (push-to-group pat-row (car pat) (list (1- (length pat)) seq-var-pos))))
-                ((var-p pat)
-                 (push pat-row bind-rows))
-                (t
-                 (push-to-group (cons (list (car pat-row)) (cdr pat-row)) pat '(0 nil)))))))
+                ((var-p pat) (push pat-row bind-rows))
+                (t (push-to-group (cons (list (car pat-row)) (cdr pat-row)) pat '(0 nil)))))))
     (map-ordered-table
      (lambda (fsym arity-groups)
-       (let (compound-clauses-1
-             constant-clauses-1)
+       (let (compound-clauses-1 constant-clauses-1)
          (map-ordered-table
           (lambda (arity-info pat-rows)
             (let* ((n-args (car arity-info))
@@ -67,17 +63,17 @@
                    (seq-var-pos (cadr arity-info)))
               (when (> n-args 0)
                 (push `(when ,(if seq-var-pos
-                                  `(>= (n-variadic-slots ,offset ,var) ,(1- n-args))
-                                  `(= (n-variadic-slots ,offset ,var) ,n-args))
+                                  `(>= (n-variadic-slots ,offset ,subject) ,(1- n-args))
+                                  `(= (n-variadic-slots ,offset ,subject) ,n-args))
                          (let ,(mapcar
                                 (lambda (i arg-var)
                                   (case (if seq-var-pos (signum (- i seq-var-pos)) -1)
-                                    (-1 `(,arg-var (get-variadic-slot ,i ,offset ,var)))
-                                    (0 `(,arg-var (variadic-slots-between ,i ,(- n-args i) ,offset ,var)))
-                                    (1 `(,arg-var (variadic-slot-from-end ,(- n-args i) ,var)))))
+                                    (-1 `(,arg-var (get-variadic-slot ,i ,offset ,subject)))
+                                    (0 `(,arg-var (variadic-slots-between ,i ,(- n-args i) ,offset ,subject)))
+                                    (1 `(,arg-var (variadic-slot-from-end ,(- n-args i) ,subject)))))
                                 (iota n-args) arg-vars)
                            ,@(expand-match offset
-                                           (append arg-vars (cdr var-list))
+                                           (append arg-vars (cdr subject-list))
                                            (mapcar (lambda (pat-row)
                                                      (append (cdar pat-row) (cdr pat-row)))
                                                    pat-rows))))
@@ -85,13 +81,13 @@
               (when (= n-args 0)
                 (nconcf constant-clauses-1
                         (expand-match offset
-                                      (cdr var-list)
+                                      (cdr subject-list)
                                       (mapcar #'cdr pat-rows))))
               ;; Single SEQ-VAR matches constant and binds to NIL
               (when (and (= n-args 1) (eql seq-var-pos 0))
                 (nconcf constant-clauses-1
                         (expand-match offset
-                                      (cons nil (cdr var-list))
+                                      (cons nil (cdr subject-list))
                                       (mapcar (lambda (pat-row)
                                                 (append (cdar pat-row) (cdr pat-row)))
                                               pat-rows))))))
@@ -103,14 +99,14 @@
      groups)
     (append
      (expand-match offset
-                   (cdr var-list)
+                   (cdr subject-list)
                    (mapcar (lambda (pat-row)
-                             (subst-row var (car pat-row) (cdr pat-row)))
+                             (subst-row subject (car pat-row) (cdr pat-row)))
                            bind-rows))
      (when (or constant-clauses compound-clauses)
-       `((if (rose-node-p ,var)
-             (case/bind (rose-node-fsym ,var) ,@compound-clauses)
-             (case/bind ,var ,@constant-clauses)))))))
+       `((if (rose-node-p ,subject)
+             (case/bind (rose-node-fsym ,subject) ,@compound-clauses)
+             (case/bind ,subject ,@constant-clauses)))))))
 
 (defun expand-template (tmpl cost-fn offset)
   (labels ((process (tmpl)
