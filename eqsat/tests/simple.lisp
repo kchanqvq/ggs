@@ -132,9 +132,10 @@
     (is (= 255 (egraph-n-eclasses *egraph*)))))
 
 (defrw sub-cancel (- ?a ?a) 0)
+(defrw div-cancel (/ (?a) (?a)) 1 :guard (not (eql ?a 0)))
 (defrw add-2 (+ ?a ?a) (* 2 ?a))
 
-(def-test nonlinear ()
+(def-test nonlinear.1 ()
   (let* ((*egraph* (make-egraph :analyses 'ast-size))
          (a (term-enode '(- (+ a b) (+ b a))))
          (b (term-enode '(- (+ a a) (* 2 a))))
@@ -147,6 +148,20 @@
     (is (equal 0 (greedy-extract a 'ast-size)))
     (is (equal 0 (greedy-extract b 'ast-size)))
     (is (equal 'a (greedy-extract c 'ast-size)))))
+
+(def-test nonlinear.2 ()
+  (let* ((*egraph* (make-egraph :analyses 'ast-size))
+         (a (term-enode '(/ (- a a) (- a a))))
+         (b (term-enode '(/ 3 5)))
+         (c (term-enode '(/ 5 5))))
+    (egraph-rebuild)
+    (is (eq :saturate
+            (run-rewrites '(sub-cancel div-cancel
+                            commute-add commute-mul add-0 mul-0 mul-1)
+                          :check t :max-iter 10)))
+    (is (equal '(/ 0 0) (greedy-extract a 'ast-size)))
+    (is (equal '(/ 3 5) (greedy-extract b 'ast-size)))
+    (is (equal 1 (greedy-extract c 'ast-size)))))
 
 (defrw d-sin (d ?x (sin ?x)) (cos ?x))
 (defrw d-cos (d ?x (cos ?x)) (* -1 (sin ?x)))

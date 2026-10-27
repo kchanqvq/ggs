@@ -25,22 +25,22 @@ evaluate CONT-EXPR."
                   (progn (push var bound-vars) var)))
              (lisp-arg-vars (mapcar #'lisp-var arg-vars))
              (lhs-bound-p (member var bound-vars))
-             (fsym-var-p (var-p fsym))
+             (fsym-var (and (var-p fsym) (lisp-var fsym)))
              (node-var (lisp-var var))
              ;; What happens after NODE-VAR is bound
              (body
               ;; We check arity first, and SBCL seems to know to eliminate SVREF
               ;; bound checks in the body
               `(when (= (enode-n-args ,node-var) ,(length arg-vars))
-                 (let (,@(when fsym-var-p
-                           `((,fsym (enode-fsym ,node-var))))
+                 (let (,@(when fsym-var `((,fsym-var (enode-fsym ,node-var))))
                        ,@(mapcar (lambda (lisp-arg-var i)
                                    `(,lisp-arg-var (svref ,node-var ,i)))
                                  lisp-arg-vars
                                  (iota (length lisp-arg-vars) :start +enode-args-offset+)))
-                   (declare (ignorable ,@(when fsym-var-p `(,fsym)) ,@lisp-arg-vars)
+                   (declare (ignorable ,@(when fsym-var `(,fsym-var)) ,@lisp-arg-vars)
                             (type enode ,@lisp-arg-vars))
-                   (when (and ,@(mapcan (lambda (lisp-var var)
+                   (when (and ,@(when fsym-var `((eq ,fsym-var ,fsym)))
+                              ,@(mapcan (lambda (lisp-var var)
                                           (when (and (var-p var) (not (var-p lisp-var)))
                                             `((eq ,lisp-var ,var))))
                                         lisp-arg-vars arg-vars))
@@ -51,7 +51,7 @@ evaluate CONT-EXPR."
         ;; for matching, thus no-need to `enode-find' representative of VAR
         ;; (even if VAR is non-rep, it once was when we built the index in
         ;; `egraph-rebuild'
-        (cond (fsym-var-p
+        (cond (fsym-var
                (assert lhs-bound-p)
                `(dolist (%entry (eclass-info-fsym-index (enode-class-info ,var)))
                   (dolist (,node-var (cdr %entry))
