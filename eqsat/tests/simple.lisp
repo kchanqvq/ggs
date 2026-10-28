@@ -2,7 +2,7 @@
     (:use #:cl #:ggs/eqsat #:alexandria)
   (:import-from #:fiveam
                 #:def-suite* #:def-suite
-                #:def-test #:is #:in-suite)
+                #:def-test #:is #:signals #:in-suite)
   (:import-from #:serapeum #:collecting))
 
 (serapeum:eval-always
@@ -226,6 +226,95 @@
     (egraph-rebuild)
     (run-rewrites '(commute-add assoc-add d-var d-const const-fold) :max-iter 10)
     (is (eq (enode-find (term-enode 1)) (enode-find a)))))
+
+(defrw seq-swap (f ?a ??x ?b) (f ?b ??x ?a))
+
+(def-test seq-var.middle ()
+  (let* ((*egraph* (make-egraph))
+         (a (term-enode '(f 1 2 3 4)))
+         (b (term-enode '(f 1 2)))
+         (c (term-enode '(f 1))))
+    (egraph-rebuild)
+    (is (eq :saturate (run-rewrites 'seq-swap :check t :max-iter 10)))
+    (is (eq (enode-find a) (enode-find (term-enode '(f 4 2 3 1)))))
+    ;; ??X matches no argument
+    (is (eq (enode-find b) (enode-find (term-enode '(f 2 1)))))
+    ;; Too few arguments to match
+    (is (= 1 (length (list-enodes c))))))
+
+(defrw seq-rotate (f ??x ?b) (g ?b ??x))
+
+(def-test seq-var.first ()
+  (let* ((*egraph* (make-egraph))
+         (a (term-enode '(f 1 2 3)))
+         (b (term-enode '(f 1))))
+    (egraph-rebuild)
+    (is (eq :saturate (run-rewrites 'seq-rotate :check t :max-iter 10)))
+    (is (eq (enode-find a) (enode-find (term-enode '(g 3 1 2)))))
+    (is (eq (enode-find b) (enode-find (term-enode '(g 1)))))))
+
+(defrw seq-wrap (h ??x) (k (h ??x) 0))
+
+(def-test seq-var.template ()
+  (let* ((*egraph* (make-egraph))
+         (a (term-enode '(h x y)))
+         (b (term-enode '(k (h x y) 0)))
+         (n-enodes (progn (egraph-rebuild) (egraph-n-enodes *egraph*))))
+    (is (eq :saturate (run-rewrites 'seq-wrap :check t :max-iter 10)))
+    (is (eq (enode-find a) (enode-find b)))
+    ;; The RHS is hash-consed to the existing enodes
+    (is (= n-enodes (egraph-n-enodes *egraph*)))))
+
+(defrw seq-same (p (f ??x) (f ??x)) yes)
+
+(def-test seq-var.nonlinear ()
+  (let* ((*egraph* (make-egraph))
+         (yes (term-enode 'yes))
+         (same (term-enode '(p (f a b) (f a b))))
+         (differ (term-enode '(p (f a b) (f a c))))
+         (prefix-1 (term-enode '(p (f a b) (f a b c))))
+         (prefix-2 (term-enode '(p (f a b c) (f a b)))))
+    (egraph-rebuild)
+    (is (eq :saturate (run-rewrites 'seq-same :check t :max-iter 10)))
+    (is (eq (enode-find yes) (enode-find same)))
+    (is (not (eq (enode-find yes) (enode-find differ))))
+    (is (not (eq (enode-find yes) (enode-find prefix-1))))
+    (is (not (eq (enode-find yes) (enode-find prefix-2))))))
+
+(defrw seq-fsym (q (?g ??x)) (r (?g ??x)))
+
+(def-test seq-var.fsym ()
+  (let* ((*egraph* (make-egraph))
+         (a (term-enode '(q (h 1 2))))
+         (b (term-enode '(q (j)))))
+    (egraph-rebuild)
+    (is (eq :saturate (run-rewrites 'seq-fsym :check t :max-iter 10)))
+    (is (eq (enode-find a) (enode-find (term-enode '(r (h 1 2))))))
+    (is (eq (enode-find b) (enode-find (term-enode '(r j)))))))
+
+;;; Type checks
+
+(defvar *not-an-enode* 'x "Type unknown at compile time.")
+
+(def-test type-check.make-enode ()
+  (let* ((*egraph* (make-egraph))
+         (a (make-enode 'a))
+         (x *not-an-enode*)
+         (xs (list x)))
+    (signals type-error (make-enode 'f a x))
+    (signals type-error (funcall 'make-enode 'f a x))
+    (signals type-error (ggs/eqsat::make-enode-from-args 'f (list a x)))
+    (signals type-error (funcall 'ggs/eqsat::make-enode-from-args 'f (list a x)))
+    ;; Elements of a sequence argument
+    (signals type-error (ggs/eqsat::make-enode-from-args 'f (append (list a) xs)))))
+
+(def-test type-check.enode-merge ()
+  (let* ((*egraph* (make-egraph))
+         (a (make-enode 'a))
+         (x *not-an-enode*))
+    (signals type-error (enode-merge a x))
+    (signals type-error (enode-merge x a))
+    (signals type-error (enode-merge a (make-enode 'f x)))))
 
 ;;; Micro benchmark
 

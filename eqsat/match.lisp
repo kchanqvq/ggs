@@ -14,6 +14,11 @@
         (t ;; Non-variable atoms are short hand for 0-arity function symbol
          (parse-pattern (list pat) eclass-var))))
 
+(declaim (inline seq-equal))
+(defun seq-equal (xs ys)
+  (declare (type list xs ys))
+  (and (= (length xs) (length ys)) (every #'eq xs ys)))
+
 (defun expand-match (bound-vars subst-alist cont-expr)
   "Generate code that solves for SUBST-ALIST (as returned by `parse-pattern') then
 evaluate CONT-EXPR."
@@ -24,26 +29,37 @@ evaluate CONT-EXPR."
                   (gensym-1 fsym)
                   (progn (push var bound-vars) var)))
              (lisp-arg-vars (mapcar #'lisp-var arg-vars))
+             (n-args (length arg-vars))
+             (seq-var-pos (seq-var-pos arg-vars))
              (lhs-bound-p (member var bound-vars))
              (fsym-var (and (var-p fsym) (lisp-var fsym)))
              (node-var (lisp-var var))
+             ((:flet arg-var-binding (i lisp-arg-var))
+              (case (if seq-var-pos (signum (- i seq-var-pos)) -1)
+                (-1 `(,lisp-arg-var (enode-arg ,i ,node-var)))
+                (0 `(,lisp-arg-var
+                     (variadic-slots-between ,i ,(- n-args i)+enode-args-offset+ ,node-var)))
+                (1 `(,lisp-arg-var (variadic-slot-from-end ,(- n-args i) ,node-var)))))
              ;; What happens after NODE-VAR is bound
              (body
               ;; We check arity first, and SBCL seems to know to eliminate SVREF
               ;; bound checks in the body
-              `(when (= (enode-n-args ,node-var) ,(length arg-vars))
+              `(when ,(if seq-var-pos
+                          `(>= (enode-n-args ,node-var) ,(1- n-args))
+                          `(= (enode-n-args ,node-var) ,n-args))
                  (let (,@(when fsym-var `((,fsym-var (enode-fsym ,node-var))))
-                       ,@(mapcar (lambda (lisp-arg-var i)
-                                   `(,lisp-arg-var (svref ,node-var ,i)))
-                                 lisp-arg-vars
-                                 (iota (length lisp-arg-vars) :start +enode-args-offset+)))
+                       ,@(mapcar #'arg-var-binding (iota n-args) lisp-arg-vars))
                    (declare (ignorable ,@(when fsym-var `(,fsym-var)) ,@lisp-arg-vars)
-                            (type enode ,@lisp-arg-vars))
+                            (type enode ,@(mapcan (lambda (a l) (unless (seq-var-p a) (list l)))
+                                                  arg-vars lisp-arg-vars))
+                            (type list ,@(mapcan (lambda (a l) (when (seq-var-p a) (list l)))
+                                                 arg-vars lisp-arg-vars)))
                    (when (and ,@(when fsym-var `((eq ,fsym-var ,fsym)))
-                              ,@(mapcan (lambda (lisp-var var)
-                                          (when (and (var-p var) (not (var-p lisp-var)))
-                                            `((eq ,lisp-var ,var))))
-                                        lisp-arg-vars arg-vars))
+                              ,@(mappend (lambda (lisp-var var)
+                                           (when (and (var-p var) (not (var-p lisp-var)))
+                                             `((,(if (seq-var-p var) 'seq-equal 'eq)
+                                                ,lisp-var ,var))))
+                                         lisp-arg-vars arg-vars))
                      ,(expand-match bound-vars rest cont-expr))))))
 
         ;; Currently we use indexes (`egraph-fsym-index' and
@@ -72,8 +88,11 @@ evaluate CONT-EXPR."
   "Generate code that creates an enode according to TMPL (rhs of rewrite rule)."
   (labels ((process (tmpl)
              (cond ((consp tmpl)
-                    `(make-enode ,(if (var-p (car tmpl)) (car tmpl) `',(car tmpl))
-                                 ,@(mapcar #'process (cdr tmpl))))
+                    `(make-enode-from-args
+                      ,(if (var-p (car tmpl)) (car tmpl) `',(car tmpl))
+                      (append ,@(mapcar (lambda (arg)
+                                          (if (seq-var-p arg) arg `(list ,(process arg))))
+                                        (cdr tmpl)))))
                    ((var-p tmpl) tmpl)
                    (t (process (list tmpl))))))
     (process tmpl)))

@@ -4,8 +4,10 @@
                 #:partition #:lret)
   (:import-from #:metabang-bind #:bind)
   (:import-from #:ggs/common #:get-analysis-data)
-  (:export #:define-variadic-structure #:do-variadic-slots #:n-variadic-slots #:get-variadic-slot
-           #:var-p #:seq-var-p #:gensym-1 #:case/bind
+  (:export #:define-variadic-structure #:do-variadic-slots #:n-variadic-slots
+           #:get-variadic-slot #:variadic-slots-between #:variadic-slot-from-end
+           #:list-form-items #:single-item-p
+           #:var-p #:seq-var-p #:seq-var-pos #:gensym-1 #:case/bind
            #:get-rules #:get-analysis #:get-user-decls #:get-analysis-data
            #:warn-compile-rule-set))
 
@@ -28,43 +30,55 @@
 (defmacro get-variadic-slot (i offset variadic-structure)
   `(svref ,variadic-structure (+ ,i ,offset)))
 
+(declaim (inline variadic-slots-between variadic-slot-from-end))
+(defun variadic-slots-between (from-start from-end offset node)
+  (loop for i from (+ offset from-start)
+          to (- (length node) from-end)
+        collect (svref node i)))
+(defun variadic-slot-from-end (from-end node)
+  (svref node (- (length node) from-end)))
+
+(defun list-form-items (form)
+  "Normalize mix of `append', `list' and `list*' into a list of (LIST SINGLE-ITEM)
+or MULTIPLE-ITEM."
+  (typecase form
+    (null '())
+    ((cons (eql list)) (mapcar (lambda (f) `(list ,f)) (cdr form)))
+    ((cons (eql list*)) (append (list-form-items `(list ,@(butlast (cdr form))))
+                                (list-form-items (lastcar (cdr form)))))
+    ((cons (eql append)) (mappend #'list-form-items (cdr form)))
+    (t (list form))))
+
+(defun single-item-p (item)
+  (and (consp item) (eq (car item) 'list)))
+
 (defun expand-make (args fixed offset)
-  (labels ((items (form)
-             (typecase form
-               (null '())
-               ((cons (eql list)) (mapcar (lambda (f) `(list ,f)) (cdr form)))
-               ((cons (eql list*)) (append (items `(list ,@(butlast (cdr form))))
-                                           (items (lastcar (cdr form)))))
-               ((cons (eql append)) (mapcan #'items (cdr form)))
-               (t (list form))))
-           (single-item-p (item)
-             (and (consp item) (eq (car item) 'list))))
-    (let* ((items (items args))
-           (vars (make-gensym-list (length items))))
-      (if (notevery #'single-item-p items)
-          `(let* (,@(mapcar (lambda (item var)
-                              `(,var ,(if (single-item-p item) (second item) item)))
-                            items vars)
-                  (new (make-array
-                        (+ ,(+ offset (count-if #'single-item-p items))
-                           ,@(mappend (lambda (item var)
-                                       (unless (single-item-p item) `((length ,var))))
-                                     items vars))))
-                  (i ,offset))
-             (declare (fixnum i))
-             (setf ,@(loop for f in fixed
-                           for k from 0
-                           append `((svref new ,k) ,f)))
-             ,@(mappend (lambda (item var)
-                          (if (single-item-p item)
-                              `((setf (svref new i) ,var)
-                                (incf i))
-                              `((dolist (x ,var)
-                                  (setf (svref new i) x)
-                                  (incf i)))))
-                        items vars)
-             new)
-          `(vector ,@fixed ,@(mapcar #'second items))))))
+  (let* ((items (list-form-items args))
+         (vars (make-gensym-list (length items))))
+    (if (notevery #'single-item-p items)
+        `(let* (,@(mapcar (lambda (item var)
+                            `(,var ,(if (single-item-p item) (second item) item)))
+                          items vars)
+                (new (make-array
+                      (+ ,(+ offset (count-if #'single-item-p items))
+                         ,@(mappend (lambda (item var)
+                                      (unless (single-item-p item) `((length ,var))))
+                                    items vars))))
+                (i ,offset))
+           (declare (fixnum i))
+           (setf ,@(loop for f in fixed
+                         for k from 0
+                         append `((svref new ,k) ,f)))
+           ,@(mappend (lambda (item var)
+                        (if (single-item-p item)
+                            `((setf (svref new i) ,var)
+                              (incf i))
+                            `((dolist (x ,var)
+                                (setf (svref new i) x)
+                                (incf i)))))
+                      items vars)
+           new)
+        `(vector ,@fixed ,@(mapcar #'second items)))))
 
 (defmacro define-variadic-structure (name-and-options &body slot-and-options)
   "Supports :INCLUDE, child structures inherits all slots *except* the variadic
@@ -145,6 +159,11 @@ alike"
 
 (defun seq-var-p (object)
   (and (symbolp object) (string-prefix-p "??" (symbol-name object))))
+
+(defun seq-var-pos (args)
+  (lret ((seq-var-pos (position-if #'seq-var-p args)))
+    (when (and seq-var-pos (find-if #'seq-var-p args :start (1+ seq-var-pos)))
+      (error "Multiple sequence variables in ~A." args))))
 
 (defun gensym-1 (thing)
   (make-gensym (princ-to-string thing)))

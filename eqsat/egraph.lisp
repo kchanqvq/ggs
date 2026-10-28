@@ -241,47 +241,63 @@ CLASS-LIST, N-ECLASSES and FSYM-INDEX are only up-to-date after
       (when existing-p
         (%enode-merge enode eclass)))))
 
-(defmacro with-key-node (key-node-var (fsym &rest args) &body body)
-  ;; internal, may evaluate FSYM and ARGS multiple times, please only pass in
-  ;; variables
-  `(let* (,@(mapcar (lambda (arg) `(,arg (enode-find ,arg))) args)
-          (hash
-            (let ((hash (sxhash ,fsym))
-                  (mul (logand 3622009729038463111 most-positive-fixnum))
-                  (xor (logand 608948948376289905 most-positive-fixnum)))
-              (declare (ignorable mul xor))
-              ,@(mapcar
-                 (lambda (arg)
-                   `(setq hash (logand (+ hash (* (enode-hash-code ,arg) mul)) most-positive-fixnum)
-                          hash (logand (logxor xor hash (ash hash -5)) most-positive-fixnum)))
-                 args)
-              (ldb (byte +enode-hash-bits+ 0) hash)))
-          (,key-node-var
-            (%make-enode :fsym ,fsym :args (list ,@args)
-                         :hash-code-and-flags (logior (ash hash +enode-flag-bits+) 1))))
-     (declare (dynamic-extent ,key-node-var))
-     ,@body))
+(defmacro with-key-node (key-node-var (fsym &rest arg-items) &body body)
+  "Internal, FSYM maybe evaluated multiple time, please pass in a constant or
+variable. ARG-ITEMS should be like what `list-form-items' return."
+  (bind ((arg-vars (make-gensym-list (length arg-items) "ARG"))
+         ((:flet set-hash-form (hash arg))
+          `(setq ,hash (logand (+ ,hash (* (enode-hash-code ,arg) mul)) most-positive-fixnum)
+                 ,hash (logand (logxor xor ,hash (ash ,hash -5)) most-positive-fixnum))))
+    `(let* (,@(mapcar (lambda (arg-var arg)
+                        (if (single-item-p arg)
+                            `(,arg-var (enode-find ,(cadr arg)))
+                            `(,arg-var (mapcar #'enode-find ,arg))))
+                      arg-vars arg-items)
+            (hash
+              (let ((hash (sxhash ,fsym))
+                    (mul (logand 3622009729038463111 most-positive-fixnum))
+                    (xor (logand 608948948376289905 most-positive-fixnum)))
+                (declare (ignorable mul xor))
+                ,@(mapcar
+                   (lambda (arg-var arg)
+                     (if (single-item-p arg)
+                         (set-hash-form 'hash arg-var)
+                         `(dolist (arg-1 ,arg-var)
+                            ,(set-hash-form 'hash 'arg-1))))
+                   arg-vars arg-items)
+                (ldb (byte +enode-hash-bits+ 0) hash)))
+            (,key-node-var
+              (%make-enode
+               :fsym ,fsym
+               :args (append ,@(mapcar (lambda (arg-var arg)
+                                         (if (single-item-p arg) `(list ,arg-var) arg-var))
+                                       arg-vars arg-items))
+               :hash-code-and-flags (logior (ash hash +enode-flag-bits+) 1))))
+       (declare (dynamic-extent ,key-node-var))
+       ,@body)))
 
-(declaim (inline make-enode))
-(defun make-enode (fsym &rest args)
-  "Make an enode inside `*egraph*'."
-  (dolist (arg args) (check-type arg enode))
-  (let ((key-node (%make-enode :fsym fsym :args args)))
-    (declare (dynamic-extent key-node))
-    (canonicalize-key-node key-node)
-    (%intern-enode key-node)))
-
-(define-compiler-macro make-enode (fsym &rest args &environment env)
+(defmacro %make-enode-from-args (fsym args-form &environment env)
   ;; don't rebind FSYM if it's a constant, so that (sxhash FSYM) inside
   ;; `with-key-node' can be constant folded
-  (let ((fsym-var (unless (constantp fsym env) 'fsym))
-        (arg-vars (make-gensym-list (length args) "ARG")))
-    `(let (,@(when fsym-var `((,fsym-var ,fsym)))
-           ,@(mapcar #'list arg-vars args))
+  (let ((fsym-var (unless (constantp fsym env) 'fsym)))
+    `(let (,@(when fsym-var `((,fsym-var ,fsym))))
        (declare (optimize speed (safety 0)))
-       ,@(mapcar (lambda (arg) `(check-type ,arg enode)) arg-vars)
-       (with-key-node key-node (,(or fsym-var fsym) ,@arg-vars)
+       (with-key-node key-node (,(or fsym-var fsym) ,@(list-form-items args-form))
          (%intern-enode key-node)))))
+
+(defun make-enode-from-args (fsym args)
+  "Make an enode inside `*egraph*'."
+  (%make-enode-from-args fsym args))
+
+(defun make-enode (fsym &rest args)
+  "Make an enode inside `*egraph*'."
+  (%make-enode-from-args fsym args))
+
+(define-compiler-macro make-enode-from-args (fsym args)
+  `(%make-enode-from-args ,fsym ,args))
+
+(define-compiler-macro make-enode (fsym &rest args)
+  `(%make-enode-from-args ,fsym (list ,@args)))
 
 (declaim (inline enode-merge))
 (defun enode-merge (x y)
@@ -290,21 +306,22 @@ CLASS-LIST, N-ECLASSES and FSYM-INDEX are only up-to-date after
   (check-type y enode)
   (%enode-merge x y))
 
+(defmacro %merge-make-enode-from-args (existing fsym args-form &environment env)
+  ;; don't rebind FSYM if it's a constant, so that (sxhash FSYM) inside
+  ;; `with-key-node' can be constant folded
+  (let ((fsym-var (unless (constantp fsym env) 'fsym)))
+    (once-only (existing)
+      `(let (,@(when fsym-var `((,fsym-var ,fsym))))
+         (declare (optimize speed (safety 0)))
+         (check-type ,existing enode)
+         (with-key-node key-node (,(or fsym-var fsym) ,@(list-form-items args-form))
+           (%intern-merge-enode ,existing key-node))))))
+
 (define-compiler-macro enode-merge (&whole form x y &environment env)
   (cond ((and (consp y) (eql (car y) 'make-enode))
-         (destructuring-bind (fsym &rest args) (cdr y)
-           (once-only (x)
-             ;; don't rebind FSYM if it's a constant, so that (sxhash FSYM) inside
-             ;; `with-key-node' can be constant folded
-             (let ((fsym-var (unless (constantp fsym env) 'fsym))
-                   (arg-vars (make-gensym-list (length args) "ARG")))
-               `(let (,@(when fsym-var `((,fsym-var ,fsym)))
-                      ,@(mapcar #'list arg-vars args))
-                  (declare (optimize speed (safety 0)))
-                  (check-type ,x enode)
-                  ,@(mapcar (lambda (arg) `(check-type ,arg enode)) arg-vars)
-                  (with-key-node key-node (,(or fsym-var fsym) ,@arg-vars)
-                    (%intern-merge-enode ,x key-node)))))))
+         `(%merge-make-enode-from-args ,x ,(cadr y) (list ,@(cddr y))))
+        ((and (consp y) (eql (car y) 'make-enode-from-args))
+         `(%merge-make-enode-from-args ,x ,(cadr y) ,(caddr y)))
         (t form)))
 
 (-> %enode-merge (enode enode) null)
