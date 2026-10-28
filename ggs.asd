@@ -57,6 +57,8 @@
   :components ((:file "simple")
                (:file "math")
                (:file "matmul"))
-  :perform (test-op (o c)
-                    (symbol-call :fiveam '#:run! :ggs/eqsat)
-                    (symbol-call :fiveam '#:run! :ggs/eqsat/bench)))
+  :perform (test-op (o c) (symbol-call :fiveam '#:run! :ggs/eqsat)))
+
+(asdf:defsystem #:ggs/eqsat/benchmark
+  :depends-on (:ggs/eqsat/tests)
+  :perform (test-op (o c) (symbol-call :fiveam '#:run! :ggs/eqsat/bench)))

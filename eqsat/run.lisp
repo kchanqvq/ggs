@@ -45,21 +45,24 @@
        ',name)))
 
 (defun compiled-rules (name)
-  "Return an ALIST of ((RULE-NAME . LAMBDA) ...)"
-  (let ((user-decls (get-user-decls nil))
-        (warned nil))
-    (mappend (lambda (rule)
-               (if (symbolp rule)
-                   (compiled-rules rule)
-                   `((,name
-                      . ,(ensure-gethash
-                          (list name rule user-decls) *compiled-rules*
-                          (progn
-                            (unless warned
-                              (warn-compile-rule-set `(precompile-eqsat-rule-set ,name))
-                              (setq warned t))
-                            (compile nil (compute-rule-lambda name rule user-decls))))))))
-             (get-rules name))))
+  "Return an ALIST of ((LAMBDA INCLUDED-FROM...) ...)."
+  (bind ((user-decls (get-user-decls nil))
+         (warned nil)
+         ((:labels process (rule-set))
+          (mapcar (rcurry #'append (list rule-set))
+                  (mappend
+                   (lambda (rule)
+                     (if (symbolp rule)
+                         (process rule)
+                         `((,(ensure-gethash
+                              (list rule-set rule user-decls) *compiled-rules*
+                              (progn
+                                (unless warned
+                                  (warn-compile-rule-set `(precompile-eqsat-rule-set ,name))
+                                  (setq warned t))
+                                (compile nil (compute-rule-lambda rule-set rule user-decls))))))))
+                   (get-rules rule-set)))))
+    (process name)))
 
 (defun run-rewrites (rule-sets &key max-iter max-time check verbose
                                  initial-match-limit
@@ -73,10 +76,12 @@ Returns the reason for termination: one of :max-iter, :max-time, :saturate.
 
 If INITIAL-MATCH-LIMIT is non-nil, schedule rules in the style of egg's
 BackoffScheduler. INITIAL-MATCH-LIMIT and INITIAL-BAN-LENGTH can either be
-numbers that specify the respective values, or alists of form ((RULE . VALUE)
-...) that provide rule-specific configurations. An entry with T in place of RULE
-specifies the default value. INITIAL-BAN-LENGTH defaults to 5 when no value is
-specified.
+numbers that specify the respective values for all rules, or alists of
+form ((RULE . VALUE) ...) that provide rule-specific configurations. If RULE
+names a rule set, VALUE applies to each individual rule included in that rule
+set. If RULE is T, VALUE specifies the default value for all rules. When
+multiple configuration values is applicable for a rule, the most specific one
+takes precedence. INITIAL-BAN-LENGTH defaults to 5 when no value is specified.
 
 Note: this function does not call `egraph-rebuild' upfront. Particularly, if you
 have added some terms to EGRAPH, you MUST call `egraph-rebuild' before calling
@@ -98,11 +103,11 @@ this function."
       (when verbose (format t "Iteration ~d: " n-iter))
       (when verbose (format t "Applying rules... "))
       (unwind-protect
-           (loop for (name . rule) in rules do
+           (loop for (rule . included-names) in rules do
              (let* ((ban-until (gethash rule ban-until-table))
                     (ban-times (gethash rule ban-times-table 0))
-                    (initial-match-limit (alist-like-get name initial-match-limit))
-                    (initial-ban-length (alist-like-get name initial-ban-length 5))
+                    (initial-match-limit (alist-like-get included-names initial-match-limit))
+                    (initial-ban-length (alist-like-get included-names initial-ban-length 5))
                     ;; FIXME: will we ever want match-limit greater than
                     ;; `most-positive-fixnum'?
                     (match-limit (and initial-match-limit

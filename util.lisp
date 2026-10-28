@@ -202,10 +202,14 @@ everything else and bind ?VAR."
     (warn "~@<Compiling a rule set at runtime, you can precompile it with ~S~:@>"
           precompile-form)))
 
-(defun alist-like-get (key alist-like &optional default)
+(defun alist-like-get (key-or-keys alist-like &optional default)
+  "If KEY-OR-KEYS is a list, earlier key takes precedence (like an inheritance
+hierarchy)."
   (typecase alist-like
-    (cons (if-let (entry (assoc key alist-like))
-            (cdr entry)
-            (if-let (entry (assoc t alist-like))
-              (cdr entry) default)))
+    (cons
+     (dolist (key (ensure-list key-or-keys))
+       (when-let (entry (assoc key alist-like))
+         (return-from alist-like-get (cdr entry))))
+     (if-let (entry (assoc t alist-like))
+       (cdr entry) default))
     (t alist-like)))
