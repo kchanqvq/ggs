@@ -45,18 +45,20 @@
        ',name)))
 
 (defun compiled-rules (name)
+  "Return an ALIST of ((RULE-NAME . LAMBDA) ...)"
   (let ((user-decls (get-user-decls nil))
         (warned nil))
     (mappend (lambda (rule)
                (if (symbolp rule)
                    (compiled-rules rule)
-                   (list (ensure-gethash
+                   `((,name
+                      . ,(ensure-gethash
                           (list name rule user-decls) *compiled-rules*
                           (progn
                             (unless warned
                               (warn-compile-rule-set `(precompile-eqsat-rule-set ,name))
                               (setq warned t))
-                            (compile nil (compute-rule-lambda name rule user-decls)))))))
+                            (compile nil (compute-rule-lambda name rule user-decls))))))))
              (get-rules name))))
 
 (defun run-rewrites (rule-sets &key max-iter max-time check verbose
@@ -69,8 +71,12 @@ RULE-SETS can be a symbol naming a single rule set, or a list of such symbols.
 
 Returns the reason for termination: one of :max-iter, :max-time, :saturate.
 
-If INITIAL-MATCH-LIMIT is non-nil, schedule rules in the style of
-egg's BackoffScheduler.
+If INITIAL-MATCH-LIMIT is non-nil, schedule rules in the style of egg's
+BackoffScheduler. INITIAL-MATCH-LIMIT and INITIAL-BAN-LENGTH can either be
+numbers that specify the respective values, or alists of form ((RULE . VALUE)
+...) that provide rule-specific configurations. An entry with T in place of RULE
+specifies the default value. INITIAL-BAN-LENGTH defaults to 5 when no value is
+specified.
 
 Note: this function does not call `egraph-rebuild' upfront. Particularly, if you
 have added some terms to EGRAPH, you MUST call `egraph-rebuild' before calling
@@ -92,9 +98,11 @@ this function."
       (when verbose (format t "Iteration ~d: " n-iter))
       (when verbose (format t "Applying rules... "))
       (unwind-protect
-           (dolist (rule rules)
+           (loop for (name . rule) in rules do
              (let* ((ban-until (gethash rule ban-until-table))
                     (ban-times (gethash rule ban-times-table 0))
+                    (initial-match-limit (alist-like-get name initial-match-limit))
+                    (initial-ban-length (alist-like-get name initial-ban-length 5))
                     ;; FIXME: will we ever want match-limit greater than
                     ;; `most-positive-fixnum'?
                     (match-limit (and initial-match-limit

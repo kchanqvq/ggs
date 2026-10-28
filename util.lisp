@@ -9,7 +9,7 @@
            #:list-form-items #:single-item-p
            #:var-p #:seq-var-p #:seq-var-pos #:gensym-1 #:case/bind
            #:get-rules #:get-analysis #:get-user-decls #:get-analysis-data
-           #:warn-compile-rule-set))
+           #:warn-compile-rule-set #:alist-like-get))
 
 (in-package :ggs/util)
 
@@ -201,3 +201,11 @@ everything else and bind ?VAR."
   (when *warn-runtime-compile*
     (warn "~@<Compiling a rule set at runtime, you can precompile it with ~S~:@>"
           precompile-form)))
+
+(defun alist-like-get (key alist-like &optional default)
+  (typecase alist-like
+    (cons (if-let (entry (assoc key alist-like))
+            (cdr entry)
+            (if-let (entry (assoc t alist-like))
+              (cdr entry) default)))
+    (t alist-like)))
