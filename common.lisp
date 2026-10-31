@@ -3,7 +3,7 @@
   (:import-from #:serapeum #:eval-always)
   (:export #:defrw #:defrw* #:yield-rewrite
            #:define-analysis #:make-or-test #:or-eql #:or-equal #:min-maybe
-           #:*warn-runtime-compile*))
+           #:runtime-compile-warning))
 
 (in-package :ggs/common)
 
@@ -72,9 +72,11 @@ Can only be used inside `defrw', `defrw*' or `define-analysis'."
        (setf (get ',name 'analysis)
              (list :merge ,merge :bottom ,bottom :clauses '(,@clauses))))))
 
-(declaim (type boolean *warn-runtime-compile*))
-(defvar *warn-runtime-compile* t
-  "Emit warning when rules and analyses are compiled at runtime.")
+(define-condition runtime-compile-warning (warning)
+  ((form :initarg :form))
+  (:report (lambda (c s)
+             (format s "~@<Compiling at runtime, precompile it with ~S~:@>"
+                     (slot-value c 'form)))))
 
 ;;; Convenient merge functions
 

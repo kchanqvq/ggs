@@ -9,7 +9,7 @@
            #:list-form-items #:single-item-p
            #:var-p #:seq-var-p #:seq-var-pos #:gensym-1 #:case/bind
            #:get-rules #:get-analysis #:get-user-decls #:get-analysis-data
-           #:warn-compile-rule-set #:alist-like-get))
+           #:alist-like-get))
 
 (in-package :ggs/util)
 
@@ -196,11 +196,6 @@ everything else and bind ?VAR."
 (defun get-user-decls (env &optional (policies '(speed safety)))
   `((optimize ,@(remove-if-not (lambda (policy) (member (car policy) policies))
                                (cl-environments:declaration-information 'optimize env)))))
-
-(defun warn-compile-rule-set (precompile-form)
-  (when *warn-runtime-compile*
-    (warn "~@<Compiling a rule set at runtime, you can precompile it with ~S~:@>"
-          precompile-form)))
 
 (defun alist-like-get (key-or-keys alist-like &optional default)
   "If KEY-OR-KEYS is a list, earlier key takes precedence (like an inheritance

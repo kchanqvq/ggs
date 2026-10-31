@@ -58,7 +58,8 @@
                               (list rule-set rule user-decls) *compiled-rules*
                               (progn
                                 (unless warned
-                                  (warn-compile-rule-set `(precompile-eqsat-rule-set ,name))
+                                  (warn 'runtime-compile-warning
+                                        :form `(precompile-eqsat-rule-set ,name))
                                   (setq warned t))
                                 (compile nil (compute-rule-lambda rule-set rule user-decls))))))))
                    (get-rules rule-set)))))

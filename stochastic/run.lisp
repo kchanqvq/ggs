@@ -164,8 +164,8 @@
     (ensure-gethash (list rules cost-fn user-decls)
                     *compiled-rule-sets*
                     (collecting
-                      (warn-compile-rule-set
-                       `(precompile-stochastic-rule-set ,name ,cost-fn))
+                      (warn 'runtime-compile-warning
+                            :form `(precompile-stochastic-rule-set ,name ,cost-fn))
                       (doplist (key lambda (compute-rule-set-lambda
                                             rules cost-fn user-decls +rose-node-args-offset+))
                         (collect key)
