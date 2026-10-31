@@ -150,8 +150,8 @@ CLASS-LIST, N-ECLASSES and FSYM-INDEX are only up-to-date after
   (analysis-info-list (mapcar #'compiled-analysis (ensure-list analyses)) :type list)
   (analysis-work-list nil :type list))
 
-(defvar *egraph*)
-(setf (documentation '*egraph* 'variable) "Current egraph under operation.")
+(declaim (type egraph *egraph*))
+(defvar-unbound *egraph* "Current egraph under operation.")
 
 (defun make-analysis-data (eclass-info enode)
   (loop for analysis-info in (egraph-analysis-info-list *egraph*)
@@ -199,7 +199,7 @@ CLASS-LIST, N-ECLASSES and FSYM-INDEX are only up-to-date after
 (-> %intern-enode (enode) enode)
 (defun %intern-enode (key-node)
   (declare (optimize speed (safety 0)))
-  (let* ((g *egraph*)
+  (let* ((g (with-careful *egraph*))
          (hc (egraph-hash-cons g)))
     ;; Probe with the (dynamic-extent) KEY-NODE; only cons a real enode on miss.
     (values
@@ -224,7 +224,7 @@ CLASS-LIST, N-ECLASSES and FSYM-INDEX are only up-to-date after
 (defun %intern-merge-enode (eclass key-node)
   "Fusion of (%enode-merge ECLASS (%intern-enode KEY-NODE))."
   (declare (optimize speed (safety 0)))
-  (let* ((g *egraph*)
+  (let* ((g (with-careful *egraph*))
          (hc (egraph-hash-cons g))
          (eclass (enode-find eclass)))
     (multiple-value-bind (enode existing-p)
@@ -317,7 +317,7 @@ variable. ARG-ITEMS should be like what `list-form-items' return."
          (with-key-node key-node (,(or fsym-var fsym) ,@(list-form-items args-form))
            (%intern-merge-enode ,existing key-node))))))
 
-(define-compiler-macro enode-merge (&whole form x y &environment env)
+(define-compiler-macro enode-merge (&whole form x y)
   (cond ((and (consp y) (eql (car y) 'make-enode))
          `(%merge-make-enode-from-args ,x ,(cadr y) (list ,@(cddr y))))
         ((and (consp y) (eql (car y) 'make-enode-from-args))
@@ -336,7 +336,7 @@ variable. ARG-ITEMS should be like what `list-form-items' return."
                  (eclass-info-n-parents py))
           (rotatef x y)
           (rotatef px py))
-        (let ((g *egraph*))
+        (let ((g (with-careful *egraph*)))
           (dolist (parent (eclass-info-parents py))
             (when (plusp (enode-canonical-flag parent))
               (setf (enode-canonical-flag parent) 0)
@@ -347,9 +347,8 @@ variable. ARG-ITEMS should be like what `list-form-items' return."
         (merge-analysis-data x py)
         nil))))
 
-(defun egraph-rebuild (&key prune-constant &aux (g *egraph*))
+(defun egraph-rebuild (&key prune-constant &aux (g (with-careful *egraph*)))
   (declare (optimize speed (safety 0)))
-  (check-type g egraph)
   (setf prune-constant (and prune-constant (ensure-function prune-constant)))
 
   ;; Upward propagation

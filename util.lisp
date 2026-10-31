@@ -9,7 +9,7 @@
            #:list-form-items #:single-item-p
            #:var-p #:seq-var-p #:seq-var-pos #:gensym-1 #:case/bind
            #:get-rules #:get-analysis #:get-user-decls #:get-analysis-data
-           #:alist-like-get))
+           #:alist-like-get #:with-careful))
 
 (in-package :ggs/util)
 
@@ -208,3 +208,6 @@ hierarchy)."
      (if-let (entry (assoc t alist-like))
        (cdr entry) default))
     (t alist-like)))
+
+(defmacro with-careful (&body body)
+  `(locally (declare (optimize (safety 1))) ,@body))

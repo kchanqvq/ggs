@@ -4,6 +4,7 @@
 
 (defun compute-analysis-clause (fsym clauses merge)
   `((,fsym)
+    ,@(when (var-p fsym) `((declare (ignorable ,fsym))))
     ,@(mapcar
        (lambda (clause)
          (bind ((body (cdr clause))
@@ -59,23 +60,3 @@
      :name name :merge merge :bottom bottom
      :make (ensure-gethash (list merge bottom clauses) *compiled-makes*
                            (compile nil (compute-make-lambda merge bottom clauses))))))
-
-;;; Convenient merge functions
-
-(declaim (inline make-or-test or-eql or-equal min-maybe))
-(defun make-or-test (test)
-  (lambda (x y)
-    (if x (if y (if (funcall test x y) x (error "Conflicting values: ~a vs ~a" x y)) x) y)))
-
-;; At least SBCL has no problem fully inline these...
-(defun or-eql (x y)
-  "Like OR, but check (EQL X Y) if they are both non-nil."
-  (funcall (make-or-test #'eql) x y))
-
-(defun or-equal (x y)
-  "Like OR, but check (EQUAL X Y) if they are both non-nil."
-  (funcall (make-or-test #'equal) x y))
-
-(defun min-maybe (x y)
-  "Like MIN, but NIL stands for positive infinity."
-  (if x (if y (min x y) x) y))
