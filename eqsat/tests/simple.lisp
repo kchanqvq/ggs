@@ -316,6 +316,24 @@
     (signals type-error (enode-merge x a))
     (signals type-error (enode-merge a (make-enode 'f x)))))
 
+(def-test unbound-egraph ()
+  (let* ((g (make-egraph))
+         (a (let ((*egraph* g)) (make-enode 'a)))
+         (b (let ((*egraph* g)) (make-enode 'b))))
+    ;; With too few values, PROGV leaves *EGRAPH* unbound even inside a binding
+    (progv '(*egraph*) '()
+      (signals unbound-variable (make-enode 'f a))
+      (signals unbound-variable (funcall 'make-enode 'f a))
+      (signals unbound-variable (term-enode '(f a)))
+      (signals unbound-variable (enode-merge a b))
+      ;; Fused into `%intern-merge-enode' by the compiler macro
+      (signals unbound-variable (enode-merge a (make-enode 'f b)))
+      (signals unbound-variable (egraph-rebuild))
+      (signals unbound-variable (run-rewrites 'add-0 :max-iter 1)))))
+
+(def-test type-check-egraph ()
+  (signals type-error (let ((*egraph* *not-an-enode*)) (make-enode 'a))))
+
 ;;; Micro benchmark
 
 (defrw sub-canon (- ?a ?b) (+ ?a (* -1 ?b)))
