@@ -12,6 +12,7 @@
   (unless subject-list
     (return-from expand-match
       (mapcar #'serapeum:only-elt pat-mat)))
+
   ;; pattern column selection heuristics
   (when pat-mat
     (setq pat-mat (copy-tree pat-mat)
@@ -28,9 +29,10 @@
             pat-mat)))
 
   ;; GROUPS is a two-level hash table: FSYM -> (N-ARGS SEQ-VAR-POS) -> CLAUSES.
-  (let ((groups (make-ordered-table))
-        (subject (car subject-list))
-        bind-rows compound-clauses constant-clauses)
+  (bind ((groups (make-ordered-table))
+         ((subject . rest) subject-list)
+         bind-rows compound-clauses constant-clauses)
+
     (macrolet ((push-to-group (row fsym arity-info)
                  `(let ((table (or (ordered-table-get ,fsym groups)
                                    (ordered-table-put ,fsym  (make-ordered-table) groups))))
@@ -43,14 +45,14 @@
                                 (list (1- (length pat)) (seq-var-pos (cdr pat)))))
                 ((var-p pat) (push pat-row bind-rows))
                 (t (push-to-group (cons (list (car pat-row)) (cdr pat-row)) pat '(0 nil)))))))
+
     (map-ordered-table
      (lambda (fsym arity-groups)
        (let (compound-clauses-1 constant-clauses-1)
          (map-ordered-table
           (lambda (arity-info pat-rows)
-            (bind ((n-args (car arity-info))
-                   (arg-vars (make-gensym-list (car arity-info) (prin1-to-string fsym)))
-                   (seq-var-pos (cadr arity-info))
+            (bind (((n-args seq-var-pos) arity-info)
+                   (arg-vars (make-gensym-list n-args (prin1-to-string fsym)))
                    ((:flet arg-binding (i arg-var))
                     (case (if seq-var-pos (signum (- i seq-var-pos)) -1)
                       (-1 `(,arg-var (get-variadic-slot ,i ,offset ,subject)))
@@ -62,21 +64,19 @@
                                   `(= (n-variadic-slots ,offset ,subject) ,n-args))
                          (let ,(mapcar #'arg-binding (iota n-args) arg-vars)
                            ,@(expand-match offset
-                                           (append arg-vars (cdr subject-list))
+                                           (append arg-vars rest)
                                            (mapcar (lambda (pat-row)
                                                      (append (cdar pat-row) (cdr pat-row)))
                                                    pat-rows))))
                       compound-clauses-1))
               (when (= n-args 0)
                 (nconcf constant-clauses-1
-                        (expand-match offset
-                                      (cdr subject-list)
+                        (expand-match offset rest
                                       (mapcar #'cdr pat-rows))))
               ;; Single SEQ-VAR matches constant and binds to NIL
               (when (and (= n-args 1) (eql seq-var-pos 0))
                 (nconcf constant-clauses-1
-                        (expand-match offset
-                                      (cons nil (cdr subject-list))
+                        (expand-match offset (cons nil rest)
                                       (mapcar (lambda (pat-row)
                                                 (append (cdar pat-row) (cdr pat-row)))
                                               pat-rows))))))
@@ -86,9 +86,9 @@
          (when constant-clauses-1
            (push `((,fsym) ,@constant-clauses-1) constant-clauses))))
      groups)
+
     (append
-     (expand-match offset
-                   (cdr subject-list)
+     (expand-match offset rest
                    (mapcar (lambda (pat-row)
                              (subst-row subject (car pat-row) (cdr pat-row)))
                            bind-rows))
