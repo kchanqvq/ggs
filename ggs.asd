@@ -47,7 +47,18 @@
                (:file "node")
                (:file "match")
                (:file "analysis")
-               (:file "run")))
+               (:file "run"))
+  :in-order-to ((test-op (test-op "ggs/stochastic/tests"))))
+
+(asdf:defsystem #:ggs/stochastic/tests
+  :pathname "stochastic/tests/"
+  :serial t
+  :depends-on (:ggs/stochastic
+               :fiveam)
+  :components ((:file "search")
+               (:file "analysis")
+               (:file "redefinition"))
+  :perform (test-op (o c) (symbol-call :fiveam '#:run! :ggs/stochastic)))
 
 (asdf:defsystem #:ggs/eqsat/tests
   :pathname "eqsat/tests/"
@@ -57,7 +68,8 @@
                :trivial-benchmark)
   :components ((:file "simple")
                (:file "math")
-               (:file "matmul"))
+               (:file "matmul")
+               (:file "redefinition"))
   :perform (test-op (o c) (symbol-call :fiveam '#:run! :ggs/eqsat)))
 
 (asdf:defsystem #:ggs/eqsat/benchmark

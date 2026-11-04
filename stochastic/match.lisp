@@ -232,10 +232,11 @@ filled in, see RECOMPUTE-ROSE."
           (let ((var (gensym "SUBJECT")))
             (values `((,var ,subject)) var)))
 
-   `(let ,bindings
-      (do-match-internal ,offset ,category (,subject-1)
-        ,@(mapcar (lambda (clause)
-                    (bind (((pat . body) clause))
-                      (multiple-value-list
-                       (decompose-consistency-check pat offset `(progn ,@body)))))
-                  clauses)))))
+    `(let ,bindings
+       (declare (ignorable ,@(mapcar #'car bindings)))
+       (do-match-internal ,offset ,category (,subject-1)
+         ,@(mapcar (lambda (clause)
+                     (bind (((pat . body) clause))
+                       (multiple-value-list
+                        (decompose-consistency-check pat offset `(progn ,@body)))))
+                   clauses)))))
