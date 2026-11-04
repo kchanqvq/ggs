@@ -46,6 +46,7 @@
   :components ((:file "package")
                (:file "node")
                (:file "match")
+               (:file "analysis")
                (:file "run")))
 
 (asdf:defsystem #:ggs/eqsat/tests

@@ -3,4 +3,4 @@
   (:import-from #:serapeum #:eval-always #:collecting #:partition #:lret)
   (:import-from #:metabang-bind #:bind)
   (:reexport #:ggs/common)
-  (:export #:stochastic-search #:define-tree-sum-cost #:precompile-stochastic-rule-set))
+  (:export #:stochastic-search #:precompile-stochastic-rule-set))

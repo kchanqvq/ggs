@@ -4,12 +4,15 @@
                 #:partition #:lret)
   (:import-from #:metabang-bind #:bind)
   (:import-from #:ggs/common #:get-analysis-data)
-  (:export #:define-variadic-structure #:do-variadic-slots #:n-variadic-slots
+  (:export #:define-variadic-structure
+           #:do-variadic-slots #:n-variadic-slots #:map-variadic-slots
            #:get-variadic-slot #:variadic-slots-between #:variadic-slot-from-end
            #:list-form-items #:single-item-p
            #:var-p #:seq-var-p #:seq-var-pos #:gensym-1 #:case/bind
            #:get-rules #:get-analysis #:get-user-decls #:get-analysis-data
-           #:alist-like-get #:with-careful))
+           #:alist-like-get #:with-careful
+           #:term #:term-form-p #:normalize-term-form #:term-form-from-env
+           #:let/static))
 
 (in-package :ggs/util)
 
@@ -23,9 +26,14 @@
                     ,@body)
                finally (return ,result))))))
 
-(declaim (inline n-variadic-slots))
+(declaim (inline n-variadic-slots map-variadic-slots))
 (defun n-variadic-slots (offset variadic-structure)
   (- (length (the simple-vector variadic-structure)) offset))
+
+(defun map-variadic-slots (function offset variadic-structure)
+  (with-collector (collect)
+    (do-variadic-slots (arg offset variadic-structure)
+      (collect (funcall function arg)))))
 
 (defmacro get-variadic-slot (i offset variadic-structure)
   `(svref ,variadic-structure (+ ,i ,offset)))
@@ -35,6 +43,7 @@
   (loop for i from (+ offset from-start)
           to (- (length node) from-end)
         collect (svref node i)))
+
 (defun variadic-slot-from-end (from-end node)
   (svref node (- (length node) from-end)))
 
@@ -176,6 +185,7 @@ everything else and bind ?VAR."
                  cases)
     (let ((bind-forms (mapcar (lambda (clause)
                                 `(let ((,(caar clause) ,keyform))
+                                   (declare (ignorable ,(caar clause)))
                                    ,@(cdr clause)))
                               bind-clauses)))
       (cond ((and bind-forms real-cases)
@@ -211,3 +221,34 @@ hierarchy)."
 
 (defmacro with-careful (&body body)
   `(locally (declare (optimize (safety 1))) ,@body))
+
+(defun term-form-p (form)
+  (and (consp form) (eq (car form) 'term)
+       (or (= (length form) 2) (error "Illegal term form: ~S" form))))
+
+(defun normalize-term-form (form)
+  (cond ((not (term-form-p form)) form)
+        ((var-p (cadr form)) (cadr form))
+        ((not (consp (cadr form))) `(term (,(cadr form))))
+        (t form)))
+
+(defun term-form-from-env (form env)
+  (labels ((try (form)
+             (if (term-form-p form)
+                 (normalize-term-form form)
+                 (multiple-value-bind (form-1 expanded) (macroexpand-1 form env)
+                   (if expanded (try form-1) form)))))
+    (try form)))
+
+(defmacro let/static (bindings &body body &environment env)
+  "Like LET, but use SYMBOL-MACROLET for constant or term-form bindings.
+Useful for constant folding and macroexpansion-time partial evaluation."
+  (bind (((:values static dynamic)
+          (partition (lambda (v) (or (term-form-p v) (constantp v env)))
+                     bindings :key #'cadr))
+         (static (mapcar (lambda (b) (list (car b) (cadr b))) static)))
+    (cond ((and static dynamic)
+           `(symbol-macrolet ,static (let ,dynamic ,@body)))
+          (static `(symbol-macrolet ,static ,@body))
+          (t `(let ,dynamic ,@body)))))
+

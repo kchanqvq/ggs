@@ -2,16 +2,45 @@
 
 (defun subst-row (new old pat-row)
   (append (butlast pat-row)
-          (list `(let ((,old ,new))
+          (list `(let/static ((,old ,new))
                    (declare (ignorable ,old))
                    ,(lastcar pat-row)))))
 
+(defun arity-check-form (offset subject n-args seq-var-pos)
+  (cond ((symbolp subject)
+         (if seq-var-pos
+             `(>= (n-variadic-slots ,offset ,subject) ,(1- n-args))
+             `(= (n-variadic-slots ,offset ,subject) ,n-args)))
+        ((not (term-form-p subject))
+         (error "Should not reach here"))
+        ((some #'seq-var-p (cdadr subject))
+         (error "TODO"))
+        (seq-var-pos (>= (length (cdadr subject)) (1- n-args)))
+        (t (= (length (cdadr subject)) n-args))))
+
+(defun arg-form (offset subject i n-args seq-var-pos)
+  (cond ((symbolp subject)
+         (case (if seq-var-pos (signum (- i seq-var-pos)) -1)
+           (-1 `(get-variadic-slot ,i ,offset ,subject))
+           (0 `(variadic-slots-between ,i ,(- n-args i) ,offset ,subject))
+           (1 `(variadic-slot-from-end ,(- n-args i) ,subject))))
+        ((not (term-form-p subject))
+         (error "Should not reach here"))
+        ((some #'seq-var-p (cdadr subject))
+         (error "TODO"))
+        (seq-var-pos (error "TODO"))
+        (t (normalize-term-form `(term ,(nth i (cdadr subject)))))))
+
 (lp-hash-table:define-hash-table ordered-table sxhash equal :optimize ())
 
-(defun expand-match (offset subject-list pat-mat)
+(defmacro do-match-internal (offset category subject-list &body pat-mat &environment env)
+  "Assume patterns are linear, do simultaneous match against SUBJECT-LIST."
   (unless subject-list
-    (return-from expand-match
-      (mapcar #'serapeum:only-elt pat-mat)))
+    (return-from do-match-internal
+      `(progn ,@(mapcar #'serapeum:only-elt pat-mat))))
+
+  (unless (or (eq category t) (= (length subject-list) 1))
+    (error "CATEGORY only make sense for single subject."))
 
   ;; pattern column selection heuristics
   (when pat-mat
@@ -31,7 +60,11 @@
   ;; GROUPS is a two-level hash table: FSYM -> (N-ARGS SEQ-VAR-POS) -> CLAUSES.
   (bind ((groups (make-ordered-table))
          ((subject . rest) subject-list)
+         (maybe-constant (member category '(constant t)))
+         (maybe-compound (member category '(compound t)))
          bind-rows compound-clauses constant-clauses)
+
+    (setq subject (term-form-from-env subject env))
 
     (macrolet ((push-to-group (row fsym arity-info)
                  `(let ((table (or (ordered-table-get ,fsym groups)
@@ -52,71 +85,100 @@
          (map-ordered-table
           (lambda (arity-info pat-rows)
             (bind (((n-args seq-var-pos) arity-info)
-                   (arg-vars (make-gensym-list n-args (prin1-to-string fsym)))
-                   ((:flet arg-binding (i arg-var))
-                    (case (if seq-var-pos (signum (- i seq-var-pos)) -1)
-                      (-1 `(,arg-var (get-variadic-slot ,i ,offset ,subject)))
-                      (0 `(,arg-var (variadic-slots-between ,i ,(- n-args i) ,offset ,subject)))
-                      (1 `(,arg-var (variadic-slot-from-end ,(- n-args i) ,subject))))))
+                   (arg-vars (make-gensym-list n-args (prin1-to-string fsym))))
+
               (when (> n-args 0)
-                (push `(when ,(if seq-var-pos
-                                  `(>= (n-variadic-slots ,offset ,subject) ,(1- n-args))
-                                  `(= (n-variadic-slots ,offset ,subject) ,n-args))
-                         (let ,(mapcar #'arg-binding (iota n-args) arg-vars)
-                           ,@(expand-match offset
-                                           (append arg-vars rest)
-                                           (mapcar (lambda (pat-row)
-                                                     (append (cdar pat-row) (cdr pat-row)))
-                                                   pat-rows))))
-                      compound-clauses-1))
+                (when-let (check (arity-check-form offset subject n-args seq-var-pos))
+                  (push `(when ,check
+                           (let/static
+                               ,(loop for var in arg-vars
+                                      for i from 0
+                                      collect `(,var ,(arg-form offset subject
+                                                                i n-args seq-var-pos)))
+                             (do-match-internal ,offset t ,(append arg-vars rest)
+                               ,@(mapcar (lambda (pat-row)
+                                           (append (cdar pat-row) (cdr pat-row)))
+                                         pat-rows))))
+                        compound-clauses-1)))
+
               (when (= n-args 0)
-                (nconcf constant-clauses-1
-                        (expand-match offset rest
-                                      (mapcar #'cdr pat-rows))))
+                (push `(do-match-internal ,offset t ,rest ,@(mapcar #'cdr pat-rows))
+                      constant-clauses-1))
+
               ;; Single SEQ-VAR matches constant and binds to NIL
               (when (and (= n-args 1) (eql seq-var-pos 0))
-                (nconcf constant-clauses-1
-                        (expand-match offset (cons nil rest)
-                                      (mapcar (lambda (pat-row)
-                                                (append (cdar pat-row) (cdr pat-row)))
-                                              pat-rows))))))
+                (push `(do-match-internal ,offset t ,(cons nil rest)
+                         ,@(mapcar (lambda (pat-row)
+                                     (append (cdar pat-row) (cdr pat-row)))
+                                   pat-rows))
+                      constant-clauses-1))))
           arity-groups)
+
          (when compound-clauses-1
-           (push `((,fsym) ,@compound-clauses-1) compound-clauses))
+           (push `((,fsym) ,@(nreverse compound-clauses-1)) compound-clauses))
          (when constant-clauses-1
-           (push `((,fsym) ,@constant-clauses-1) constant-clauses))))
+           (push `((,fsym) ,@(nreverse constant-clauses-1)) constant-clauses))))
      groups)
 
-    (append
-     (expand-match offset rest
-                   (mapcar (lambda (pat-row)
-                             (subst-row subject (car pat-row) (cdr pat-row)))
-                           bind-rows))
-     (when (or constant-clauses compound-clauses)
-       `((if (rose-node-p ,subject)
-             (case/bind (rose-node-fsym ,subject) ,@compound-clauses)
-             (case/bind ,subject ,@constant-clauses)))))))
+    `(progn
+       ,@(when bind-rows
+           `((do-match-internal ,offset t ,rest
+               ,@(mapcar (lambda (pat-row)
+                           (subst-row subject (car pat-row) (cdr pat-row)))
+                         bind-rows))))
+       ,@(when (or (and maybe-constant constant-clauses)
+                   (and maybe-compound compound-clauses))
+           (cond ((symbolp subject)
+                  (cond ((and maybe-constant maybe-compound)
+                         `((if (rose-node-p ,subject)
+                               (case/bind (rose-node-fsym ,subject) ,@compound-clauses)
+                               (case/bind ,subject ,@constant-clauses))))
+                        (maybe-constant
+                         `((case/bind ,subject ,@constant-clauses)))
+                        (maybe-compound
+                         `((case/bind (rose-node-fsym ,subject) ,@compound-clauses)))))
+                 ((not (term-form-p subject))
+                  (error "Should not reach here"))
+                 ((var-p (caadr subject))
+                  (cond ((and maybe-constant maybe-compound)
+                         `((case/bind ,(caadr subject)
+                             ,@(if (cdadr subject) compound-clauses constant-clauses))))
+                        (maybe-constant
+                         `((case/bind ,(caadr subject) ,@constant-clauses)))
+                        (maybe-compound
+                         `((case/bind ,(caadr subject) ,@compound-clauses)))))
+                 (t (bind (((fsym . args) (cadr subject)))
+                      (mappend (lambda (c)
+                                 (cond ((eql (caar c) fsym) (cdr c))
+                                       ((var-p (caar c))
+                                        `((symbol-macrolet ((,(caar c) ',fsym))
+                                            ,@(cdr c))))))
+                               (if args
+                                   (and maybe-compound compound-clauses)
+                                   (and maybe-constant constant-clauses))))))))))
 
-(defun expand-template (tmpl cost-fn offset)
-  (labels ((process (tmpl)
-             (cond
-               ((consp tmpl)
-                ;; The APPEND may look atrocious but it does not actually cons
-                ;; at all, because :ARGS to MAEK-ROSE-NODE optimizes any mix of
-                ;; APPEND and LIST (compiler macro generated by
-                ;; DEFINE-VARIADIC-STRUCTURE)
-                (let ((fsym (if (var-p (car tmpl)) (car tmpl) `',(car tmpl)))
-                      (args `(append ,@(mapcar (lambda (arg)
-                                                 (if (seq-var-p arg) arg `(list ,(process arg))))
-                                               (cdr tmpl)))))
-                  `(if ,(if (find-if-not #'seq-var-p (cdr tmpl)) t `(or ,@(cdr tmpl)))
-                       (let ((new-node (make-rose-node :fsym ,fsym :args ,args)))
-                         (setf (rose-node-cost new-node) (,cost-fn new-node ,offset))
-                         new-node)
-                       ,fsym)))
-               ((var-p tmpl) tmpl)
-               (t `',tmpl))))
-    (process tmpl)))
+(defun expand-template (tmpl offset)
+  "Build TMPL's rose nodes with args starting at OFFSET.  Only the structure is
+filled in, see RECOMPUTE-ROSE."
+  (let ((pad (make-list (- offset +rose-node-args-offset+) :initial-element '(list 0))))
+    (labels ((process (tmpl)
+               (cond
+                 ((consp tmpl)
+                  ;; The APPEND may look atrocious but it does not actually cons
+                  ;; at all, because :ARGS to MAEK-ROSE-NODE optimizes any mix of
+                  ;; APPEND and LIST (compiler macro generated by
+                  ;; DEFINE-VARIADIC-STRUCTURE)
+                  (let ((fsym (if (var-p (car tmpl)) (car tmpl) `',(car tmpl)))
+                        (args `(append ,@pad
+                                       ,@(mapcar (lambda (arg)
+                                                   (if (seq-var-p arg) arg `(list ,(process arg))))
+                                                 (cdr tmpl)))))
+                    `(if ,(if (find-if-not #'seq-var-p (cdr tmpl)) t `(or ,@(cdr tmpl)))
+                         (make-rose-node :fsym ,fsym :args ,args)
+                         ,fsym)))
+                 ((var-p tmpl) tmpl)
+                 (t `',tmpl))))
+      (process tmpl))))
 
 (defun node-equal (x y offset)
   (labels ((process (x y)
@@ -158,11 +220,22 @@
               `(when (and ,@checks)
                  ,cont-expr)))))
 
-(defmacro do-match* ((top-node-var offset) &body clauses)
-  `(progn ,@(expand-match offset
-                          (list top-node-var)
-                          (mapcar (lambda (clause)
-                                    (bind (((pat . body) clause))
-                                      (multiple-value-list
-                                       (decompose-consistency-check pat offset `(progn ,@body)))))
-                                  clauses))))
+(defmacro do-match* (offset category subject &body clauses &environment env)
+  (setq subject (term-form-from-env subject env))
+
+  (multiple-value-bind (bindings subject-1)
+      (if (term-form-p subject)
+          (let ((renames (mapcar (lambda (var) (cons var (gensym-1 var)))
+                                 (remove-duplicates (remove-if-not #'var-p (flatten subject))))))
+            (values (mapcar (lambda (r) (list (cdr r) (car r))) renames)
+                    (sublis renames subject)))
+          (let ((var (gensym "SUBJECT")))
+            (values `((,var ,subject)) var)))
+
+   `(let ,bindings
+      (do-match-internal ,offset ,category (,subject-1)
+        ,@(mapcar (lambda (clause)
+                    (bind (((pat . body) clause))
+                      (multiple-value-list
+                       (decompose-consistency-check pat offset `(progn ,@body)))))
+                  clauses)))))

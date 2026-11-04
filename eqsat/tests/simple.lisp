@@ -91,7 +91,7 @@
 (defrw mul-0 (* ?a 0) 0)
 (defrw mul-1 (* ?a 1) ?a)
 
-(define-analysis (ast-size :merge #'min-maybe)
+(define-analysis (ast-size :merge #'min :bottom +inf-cost+ :type cost)
   ((?f ?x ?y) (+ 1 (ast-size ?x) (ast-size ?y)))
   ((?f ?x) (+ 1 (ast-size ?x)))
   ((?f) 1))

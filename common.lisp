@@ -2,7 +2,8 @@
     (:use #:cl)
   (:import-from #:serapeum #:eval-always)
   (:export #:defrw #:defrw* #:yield-rewrite
-           #:define-analysis #:make-or-test #:or-eql #:or-equal #:min-maybe
+           #:define-analysis #:make-or-test #:or-eql #:or-equal
+           #:+inf-cost+ #:cost
            #:runtime-compile-warning))
 
 (in-package :ggs/common)
@@ -51,7 +52,7 @@ Backends should `macrolet' bind this placeholder inside `defrw', `defrw*' and `d
   (declare (ignore term))
   (error "Analysis accessor ~a can only be used inside `defrw', `defrw*' or `define-analysis'." name))
 
-(defmacro define-analysis ((name &key merge bottom) &body clauses)
+(defmacro define-analysis ((name &key merge bottom (type t)) &body clauses)
   "Define analysis NAME and a macro NAME that takes a single term argument and
 returns its NAME analysis value. The macro can only be used inside `defrw',
 `defrw*' or `define-analysis'.
@@ -70,7 +71,8 @@ Can only be used inside `defrw', `defrw*' or `define-analysis'."
        `(get-analysis-data ,',name ,term))
      (eval-always
        (setf (get ',name 'analysis)
-             (list :merge ,merge :bottom ,bottom :clauses '(,@clauses))))))
+             (list #+nil :merge #+nil ,merge :merge-form ',merge :bottom ,bottom :type ',type
+                   :clauses '(,@clauses))))))
 
 (define-condition runtime-compile-warning (warning)
   ((form :initarg :form))
@@ -80,7 +82,7 @@ Can only be used inside `defrw', `defrw*' or `define-analysis'."
 
 ;;; Convenient merge functions
 
-(declaim (inline make-or-test or-eql or-equal min-maybe))
+(declaim (inline make-or-test or-eql or-equal))
 (defun make-or-test (test)
   (lambda (x y)
     (if x (if y (if (funcall test x y) x (error "Conflicting values: ~a vs ~a" x y)) x) y)))
@@ -94,6 +96,9 @@ Can only be used inside `defrw', `defrw*' or `define-analysis'."
   "Like OR, but check (EQUAL X Y) if they are both non-nil."
   (funcall (make-or-test #'equal) x y))
 
-(defun min-maybe (x y)
-  "Like MIN, but NIL stands for positive infinity."
-  (if x (if y (min x y) x) y))
+(defconstant +inf-cost+ (expt 10 10))
+
+(deftype cost ()
+  "Value type for cost analyses expected by stochastic backend."
+  `(integer 0 ,+inf-cost+))
+

@@ -14,7 +14,8 @@
   `(lambda (&key match-limit)
      (declare (optimize speed (safety 0)))
      (macrolet ((get-analysis-data (name enode)
-                  `(enode-analysis-data ',name ,enode)))
+                  `(the ,(getf (get-analysis name) :type)
+                        (enode-analysis-data ',name ,enode))))
        (when match-limit
          (let ((remaining match-limit))
            (declare (type fixnum remaining))

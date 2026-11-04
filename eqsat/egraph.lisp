@@ -276,14 +276,11 @@ variable. ARG-ITEMS should be like what `list-form-items' return."
        (declare (dynamic-extent ,key-node-var))
        ,@body)))
 
-(defmacro %make-enode-from-args (fsym args-form &environment env)
-  ;; don't rebind FSYM if it's a constant, so that (sxhash FSYM) inside
-  ;; `with-key-node' can be constant folded
-  (let ((fsym-var (unless (constantp fsym env) 'fsym)))
-    `(let (,@(when fsym-var `((,fsym-var ,fsym))))
-       (declare (optimize speed (safety 0)))
-       (with-key-node key-node (,(or fsym-var fsym) ,@(list-form-items args-form))
-         (%intern-enode key-node)))))
+(defmacro %make-enode-from-args (fsym args-form)
+  `(let/static ((%fsym ,fsym))
+     (declare (optimize speed (safety 0)))
+     (with-key-node key-node (%fsym ,@(list-form-items args-form))
+       (%intern-enode key-node))))
 
 (defun make-enode-from-args (fsym args)
   "Make an enode inside `*egraph*'."
@@ -306,16 +303,13 @@ variable. ARG-ITEMS should be like what `list-form-items' return."
   (check-type y enode)
   (%enode-merge x y))
 
-(defmacro %merge-make-enode-from-args (existing fsym args-form &environment env)
-  ;; don't rebind FSYM if it's a constant, so that (sxhash FSYM) inside
-  ;; `with-key-node' can be constant folded
-  (let ((fsym-var (unless (constantp fsym env) 'fsym)))
-    (once-only (existing)
-      `(let (,@(when fsym-var `((,fsym-var ,fsym))))
-         (declare (optimize speed (safety 0)))
-         (check-type ,existing enode)
-         (with-key-node key-node (,(or fsym-var fsym) ,@(list-form-items args-form))
-           (%intern-merge-enode ,existing key-node))))))
+(defmacro %merge-make-enode-from-args (existing fsym args-form)
+  (once-only (existing)
+    `(let/static ((%fsym ,fsym))
+       (declare (optimize speed (safety 0)))
+       (check-type ,existing enode)
+       (with-key-node key-node (%fsym ,@(list-form-items args-form))
+         (%intern-merge-enode ,existing key-node)))))
 
 (define-compiler-macro enode-merge (&whole form x y)
   (cond ((and (consp y) (eql (car y) 'make-enode))

@@ -103,7 +103,7 @@
   const-fold math-base math-diff math-integral)
 (precompile-eqsat-rule-set math-all)
 
-(define-analysis (ast-size-no-d-or-i :merge #'min-maybe)
+(define-analysis (ast-size-no-d-or-i :merge #'min :bottom +inf-cost+ :type cost)
   ((?f ?x ?y) (+ (if (member ?f '(d i)) 100 1)
                  (ast-size-no-d-or-i ?x)
                  (ast-size-no-d-or-i ?y)))
@@ -162,7 +162,7 @@
 (def-math-test math.integral-part.3 ()
   (i (ln x) x) (- (* x (ln x)) x))
 
-(define-analysis (constant-1 :merge #'min-maybe)
+(define-analysis (constant-1 :merge #'min :bottom +inf-cost+ :type cost)
   (?x 1))
 
 (def-test math.lp-extract ()

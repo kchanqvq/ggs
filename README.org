@@ -13,11 +13,14 @@ Define a simple problem:
     ((+ ?a (+ ?b ?c)) (+ (+ ?a ?b) ?c))
     ((+ ?a 0) ?a))
 
-  ;; Cost = 1 per symbol (a CASE over function symbols / constants; T is the default).
-  (define-tree-sum-cost ast-size (t 1))
+  ;; Cost = 1 per symbol.
+  (define-analysis (ast-size :merge #'min :bottom +inf-cost+ :type cost)
+    ((?f ?x ?y) (+ 1 (ast-size ?x) (ast-size ?y)))
+    ((?f ?x) (+ 1 (ast-size ?x)))
+    ((?f) 1))
 #+END_SRC
 
-Solve an instance:
+Solve an instance with stochastic term rewriting:
 #+BEGIN_SRC
 GGS-USER> (stochastic-search '(+ (+ (- x) (+ y (- x))) (+ (- y) x)) 'cancel 'ast-size
                              :max-time 1 :verbose t)
@@ -28,4 +31,26 @@ Iteration 0/16 found 2 (- X)
 2                               ; three return values, first the best cost
 (- X)                           ; then the best term
 (:N-ACCEPTED 17 :N-RESTART 1)   ; finally additional information
+#+END_SRC
+
+Or with equality saturation (=:initial-match-limit= enables the backoff scheduler):
+#+BEGIN_SRC
+GGS-USER> (let* ((*egraph* (make-egraph :analyses '(ast-size)))
+                 (input (term-enode '(+ (+ (- x) (+ y (- x))) (+ (- y) x)))))
+            (run-rewrites 'cancel :max-time 1 :initial-match-limit 1000 :max-iter 10 :verbose t)
+            (greedy-extract input 'ast-size))
+Iteration 0: Applying rules... Rebuilding... Done. 8 enodes, 8 eclasses
+Iteration 1: Applying rules... Rebuilding... Done. 16 enodes, 10 eclasses
+Iteration 2: Applying rules... Rebuilding... Done. 41 enodes, 19 eclasses
+Iteration 3: Applying rules... Rebuilding... Done. 99 enodes, 32 eclasses
+Iteration 4: Applying rules... Rebuilding... Done. 115 enodes, 21 eclasses
+Iteration 5: Applying rules... Rebuilding... Done. 114 enodes, 21 eclasses
+Iteration 6: Applying rules... Rebuilding... Done. 533 enodes, 91 eclasses
+Iteration 7: Applying rules...
+Match limit 1000 for rule CANCEL ((+ (+ ?A ?B) ?C) (WHEN T (YIELD-REWRITE (+ ?A (+ ?B ?C))))) exceeded.
+Match limit 1000 for rule CANCEL ((+ ?A (+ ?B ?C)) (WHEN T (YIELD-REWRITE (+ (+ ?A ?B) ?C)))) exceeded.
+Rebuilding... Done. 491 enodes, 57 eclasses
+Iteration 8: Applying rules... Rebuilding... Done. 491 enodes, 57 eclasses
+Iteration 9: Applying rules... Rebuilding... Done. 491 enodes, 57 eclasses
+(- X)
 #+END_SRC

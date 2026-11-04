@@ -26,7 +26,7 @@
                 ,(process args 0)))))
        clauses)))
 
-(defun compute-make-lambda (merge bottom clauses)
+(defun compute-make-lambda (merge bottom type clauses)
   (let ((clauses-by-fsym (make-ordered-table))
         (var-clauses '()))
     (dolist (clause clauses)
@@ -37,8 +37,10 @@
                              clauses-by-fsym)))
     `(lambda (top-enode)
        (macrolet ((get-analysis-data (name enode)
-                    `(enode-analysis-data ',name ,enode)))
+                    `(the ,(getf (get-analysis name) :type)
+                          (enode-analysis-data ',name ,enode))))
          (let ((result ,bottom))
+           (declare (type ,type result))
            ,@(mapcar (lambda (clause)
                        `(let ((,(car clause) top-enode))
                           (declare (ignorable ,(car clause)))
@@ -55,8 +57,9 @@
 (defvar *compiled-makes* (make-hash-table :test 'equal))
 
 (defun compiled-analysis (name)
-  (bind (((:plist merge bottom clauses) (get-analysis name)))
+  (bind (((:plist merge-form bottom clauses type) (get-analysis name))
+         (merge (eval merge-form)))
     (make-analysis-info
      :name name :merge merge :bottom bottom
-     :make (ensure-gethash (list merge bottom clauses) *compiled-makes*
-                           (compile nil (compute-make-lambda merge bottom clauses))))))
+     :make (ensure-gethash (list merge bottom type clauses) *compiled-makes*
+                           (compile nil (compute-make-lambda merge bottom type clauses))))))
