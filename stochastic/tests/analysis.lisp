@@ -32,11 +32,31 @@
   '(c 5 (h c) (k (h c) d) (pow c 3))
   "Terms bound to the template variables, constants and nodes alike.")
 
+(defparameter *sample-sequences*
+  '(() (c) (5 (h c)) ((k (h c) d) c (pow c 3)))
+  "Term lists bound to the sequence variables.")
+
 (defun template-vars (template)
   (remove-duplicates (remove-if-not #'ggs/util:var-p (flatten template))))
 
 (defun instantiate (template bindings)
-  (sublis bindings template))
+  "TEMPLATE with BINDINGS substituted, splicing sequence variables.  A compound
+term left without arguments is its function symbol, as in EXPAND-TEMPLATE."
+  (cond ((consp template)
+         (let ((term (mapcan (lambda (x)
+                               (if (ggs/util:seq-var-p x)
+                                   (copy-list (cdr (assoc x bindings)))
+                                   (list (instantiate x bindings))))
+                             template)))
+           (if (cdr term) term (car term))))
+        ((assoc template bindings) (cdr (assoc template bindings)))
+        (t template)))
+
+(defun sample-bindings (vars shift)
+  (loop for var in vars
+        for i from shift
+        for pool = (if (ggs/util:seq-var-p var) *sample-sequences* *sample-bindings*)
+        collect (cons var (nth (mod i (length pool)) pool))))
 
 (defun rule-set-context (rule-set analysis)
   "Offset, analyses alist and compiled rule set used by STOCHASTIC-SEARCH."
@@ -59,11 +79,18 @@
          (f (handler-bind ((warning #'muffle-warning))
               (compile nil `(lambda ,vars
                               (declare (ignorable ,@vars))
+                              ;; The MACROLETS of COMPUTE-RULE-SET-LAMBDA
                               (macrolet ((ggs/common::get-analysis-data (name term &environment env)
                                            (ggs/stochastic::expand-analysis-access
-                                            ,offset name ',alist term env)))
+                                            ,offset name ',alist term env))
+                                         (ggs/util:term (tmpl)
+                                           (ggs/stochastic::expand-template tmpl ',alist)))
                                 (ggs/common::get-analysis-data ,analysis (ggs/util:term ,template))))))))
-    (apply f (mapcar (lambda (b) (make-node (cdr b) offset rule-set-plist)) bindings))))
+    (apply f (mapcar (lambda (b)
+                       (if (ggs/util:seq-var-p (car b))
+                           (mapcar (lambda (term) (make-node term offset rule-set-plist)) (cdr b))
+                           (make-node (cdr b) offset rule-set-plist)))
+                     bindings))))
 
 (defun dynamic-cost (term offset rule-set-plist)
   "ANALYSIS of TERM computed on its node, the way the search reads its objective."
@@ -73,10 +100,7 @@
   (multiple-value-bind (offset alist plist) (rule-set-context rule-set analysis)
     (loop for (lhs rhs) in rules
           do (loop for shift below (length *sample-bindings*)
-                   for bindings = (loop for var in (template-vars lhs)
-                                        for i from shift
-                                        collect (cons var (nth (mod i (length *sample-bindings*))
-                                                               *sample-bindings*)))
+                   for bindings = (sample-bindings (template-vars lhs) shift)
                    for instance = (instantiate rhs bindings)
                    for expected = (reference-cost analysis instance)
                    do (is (= expected (static-cost rhs analysis offset alist bindings plist))
@@ -90,9 +114,37 @@
 (def-test template-costs-weighted ()
   (check-templates 'templates *templates* 'weighted))
 
+;; Sequence variables in templates, and arguments matched by the sequence
+;; variables of FANOUT and LAST-HEAVY.  Those need every argument at run time,
+;; so these templates have no compound arguments.
+(def-template-rules seq-templates
+  ((f ?x ??xs) (g ??xs))
+  ((f ?x ??xs) (g ?x ??xs))
+  ((f ?x ??xs) (g ??xs ?x 0))
+  ((f ?x ??xs) (g ??xs a ??xs))
+  ((f ?x ?y) (g ?y ?x a)))
+
+(def-test template-costs-sequence-variables ()
+  ;; SIZE and WEIGHTED have clauses for up to three arguments
+  (let ((*sample-sequences* '(() (c) ((k (h c) d)))))
+    (check-templates 'seq-templates *seq-templates* 'size)
+    (check-templates 'seq-templates *seq-templates* 'weighted))
+  (check-templates 'seq-templates *seq-templates* 'fanout)
+  (check-templates 'seq-templates *seq-templates* 'last-heavy))
+
 (def-test constant-analysis ()
   ;; A constant has no node; its analysis comes from the constant clauses.
   (multiple-value-bind (offset alist plist) (rule-set-context 'templates 'weighted)
     (declare (ignore alist))
     (is (= 1 (dynamic-cost 'c offset plist)))
     (is (= 1 (dynamic-cost 5 offset plist)))))
+
+(def-test template-with-variable-fsym ()
+  ;; ?G is only known at run time, but the template has arguments, so only the
+  ;; compound clauses apply: the constant clause ((?F) 1) must not.
+  (multiple-value-bind (offset alist plist) (rule-set-context 'templates 'weighted)
+    (dolist (g '(h pow))
+      (let ((bindings `((?g . ,g) (?x . c))))
+        (is (= (tree-weighted (instantiate '(?g ?x (f ?x)) bindings))
+               (static-cost '(?g ?x (f ?x)) 'weighted offset alist bindings plist))
+            "static weighted of (?g ?x (f ?x)) with ?g = ~a" g)))))

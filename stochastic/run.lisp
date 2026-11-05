@@ -37,6 +37,9 @@
             :format-arguments (list proxy-cost type))))
 
   (bind ((offset (+ +rose-node-args-offset+ (length analyses-alist)))
+         (macrolets `((get-analysis-data (name term &environment env)
+                        (expand-analysis-access ,offset name ',analyses-alist term env))
+                      (term (tmpl) (expand-template tmpl ',analyses-alist))))
          ((:flet wrap-user-decls (rule))
           `(,(car rule) (locally (declare ,@user-decls) ,@(cdr rule))))
          (compound-matcher `(do-match* ,offset compound subject
@@ -50,8 +53,7 @@
         (declare (optimize speed (safety 0))
                  (rose-node subject)
                  (fixnum beta-constant))
-        (macrolet ((get-analysis-data (name term &environment env)
-                     (expand-analysis-access ,offset name ',analyses-alist term env))
+        (macrolet (,@macrolets
                    (yield-rewrite (rhs)
                      `(locally (declare (optimize speed (safety 0)))
                         (incf (rose-node-n-rewrites subject))
@@ -81,15 +83,13 @@
         (declare (optimize speed (safety 0))
                  (rose-node subject)
                  (fixnum n-rewrites))
-        (macrolet ((get-analysis-data (name term &environment env)
-                     (expand-analysis-access ,offset name ',analyses-alist term env))
+        (macrolet (,@macrolets
                    (yield-rewrite (rhs)
                      `(locally (declare (optimize speed (safety 0)))
                         (decf n-rewrites)
                         (when (minusp n-rewrites)
                           (return-from sample
-                            (values (context ,(expand-template rhs ,offset))
-                                    %current-ruleset%))))))
+                            (values (context (term ,rhs)) %current-ruleset%))))))
           (block sample
             (macrolet ((context (rhs) rhs))
               ,compound-matcher)
@@ -106,8 +106,7 @@
                  (rose-node subject)
                  (single-float weight)
                  (fixnum beta-constant))
-        (macrolet ((get-analysis-data (name term &environment env)
-                     (expand-analysis-access ,offset name ',analyses-alist term env))
+        (macrolet (,@macrolets
                    (yield-rewrite (rhs)
                      `(locally (declare (optimize speed (safety 0)))
                         (decf weight (fastexp2
@@ -115,8 +114,7 @@
                                       beta-constant))
                         (when (minusp weight)
                           (return-from sample
-                            (values (context ,(expand-template rhs ,offset))
-                                    %current-ruleset%))))))
+                            (values (context (term ,rhs)) %current-ruleset%))))))
           (block sample
             (let ((cost (get-analysis-data ,proxy-cost subject)))
               (declare (type cost cost) (ignorable cost))
@@ -133,7 +131,8 @@
 
       get-cost
       (lambda (node)
-        ,(expand-analysis-access offset cost analyses-alist 'node nil)))))
+        (macrolet (,@macrolets)
+          ,(expand-analysis-access offset cost analyses-alist 'node nil))))))
 
 (defun get-rules-resolve-symbols (name)
   (mapcan (lambda (rule)

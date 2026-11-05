@@ -1,7 +1,7 @@
 (uiop:define-package :ggs/stochastic/tests
     (:use #:cl #:ggs/stochastic #:alexandria)
   (:import-from #:fiveam
-                #:def-suite* #:def-test #:is #:signals #:skip))
+                #:def-suite* #:def-test #:is #:signals))
 
 (in-package :ggs/stochastic/tests)
 
@@ -30,6 +30,21 @@
   ((?f ?x) (+ 1 (weighted ?x)))
   ((?f) 1))
 
+;; Sequence variables in patterns.  A single sequence variable also matches a
+;; constant, binding NIL, so FANOUT has no constant clause.
+(define-analysis (fanout :merge #'min :bottom +inf-cost+ :type cost)
+  ((?f ??xs) (+ 1 (length ??xs))))
+
+(define-analysis (last-heavy :merge #'min :bottom +inf-cost+ :type cost)
+  ((?f ??xs ?y) (+ 1 (length ??xs) (* 10 (last-heavy ?y))))
+  ((?f) 1))
+
+(defun tree-fanout (term)
+  (if (consp term) (length term) 1))
+
+(defun tree-last-heavy (term)
+  (if (consp term) (+ (1- (length term)) (* 10 (tree-last-heavy (lastcar term)))) 1))
+
 (defun tree-size (term)
   (if (consp term) (1+ (reduce #'+ (mapcar #'tree-size (cdr term)))) 1))
 
@@ -42,7 +57,8 @@
       1))
 
 (defparameter *references*
-  '((size . tree-size) (depth . tree-depth) (weighted . tree-weighted)))
+  '((size . tree-size) (depth . tree-depth) (weighted . tree-weighted)
+    (fanout . tree-fanout) (last-heavy . tree-last-heavy)))
 
 (defun reference-cost (analysis term)
   (funcall (cdr (assoc analysis *references*)) term))
@@ -179,9 +195,25 @@
 (def-test sequence-variable-in-pattern ()
   (is (equal '(g a) (nth-value 1 (search* '(f (g a) b c) 'first-arg 'size)))))
 
+(defrw* rest-args
+  ((f ?x ??rest) (g ??rest)))
+
 (def-test sequence-variable-in-template ()
-  (skip "A sequence variable in a right-hand side hits the (ERROR \"TODO\") branches of
-static matching in stochastic/match.lisp"))
+  (flet ((best (term) (subseq (multiple-value-list (search* term 'rest-args 'size)) 0 2)))
+    (is (equal '(3 (g b c)) (best '(f a b c))))
+    ;; An empty sequence makes (G ??REST) the constant G
+    (is (equal '(1 g) (best '(f a))))))
+
+(defrw* no-rules)
+
+(define-analysis (no-clauses :merge #'min :bottom 0 :type cost))
+
+(def-test empty-clauses ()
+  ;; DO-MATCH* with no clauses: an empty rule set, and an analysis without clauses
+  (multiple-value-bind (cost term) (search* '(+ x 0) 'no-rules 'size)
+    (is (= 3 cost))
+    (is (equal '(+ x 0) term)))
+  (is (eq 'x (nth-value 1 (search* '(+ x 0) 'cancel 'size :analyses '(no-clauses))))))
 
 (defrw* fold
   ((+ (?a) (?b))
@@ -202,6 +234,51 @@ static matching in stochastic/match.lisp"))
   ;; DEPTH is not among the stored analyses (quiet the compiler's report of it)
   (let ((*error-output* (make-broadcast-stream)))
     (signals error (search* '(+ x 0) 'guarded 'size))))
+
+;;; Constant arguments
+
+;; A constant costs 5 if it is A, and 1 otherwise
+(define-analysis (a-heavy :merge #'min :bottom +inf-cost+ :type cost)
+  ((?f ?x ?y) (+ 1 (a-heavy ?x) (a-heavy ?y)))
+  ((?f ?x) (+ 1 (a-heavy ?x)))
+  ((?f) (if (eq ?f 'a) 5 1)))
+
+(defun tree-a-heavy (term)
+  (if (consp term)
+      (1+ (reduce #'+ (mapcar #'tree-a-heavy (cdr term))))
+      (if (eq term 'a) 5 1)))
+
+(defrw* a-to-b (a b))
+(defrw* a-to-node (a (g b)))
+(defrw* swap-a-b (a b) (b a) ((f ?x ?y) (f ?y ?x)))
+
+(def-test rewrite-constant-argument ()
+  ;; The rewrite replaces the argument, not the node holding it
+  (loop for (term rule-set expected) in '(((f a) a-to-b (f b))
+                                          ((f a c) a-to-b (f b c))
+                                          ((f c a) a-to-b (f c b))
+                                          ((f a a) a-to-b (f b b))
+                                          ((f (f a)) a-to-b (f (f b)))
+                                          ((f a) a-to-node (f (g b))))
+        do (multiple-value-bind (cost best) (search* term rule-set 'a-heavy)
+             (is (equal expected best) "~s with ~a gave ~s" term rule-set best)
+             (is (= (tree-a-heavy expected) cost)))))
+
+(def-test constant-argument-history ()
+  ;; Every move keeps the shape (F X Y), both at finite temperature and during
+  ;; the infinite-temperature walk
+  (dolist (hard-walk '(0 100))
+    (let ((entries (loop for run in (getf (nth-value 2 (search* '(f a c) 'swap-a-b 'a-heavy
+                                                                 :hard-walk hard-walk
+                                                                 :save-full-history t))
+                                          :full-history)
+                         append (remove-if-not #'consp run))))
+      (is (< 1 (length entries)))
+      (dolist (entry entries)
+        (let ((term (getf entry :term)))
+          (is (and (consp term) (eq 'f (car term)) (= 3 (length term)))
+              "with :hard-walk ~a a move produced ~s" hard-walk term)
+          (is (= (tree-a-heavy term) (getf entry :cost))))))))
 
 ;;; Infinite cost
 

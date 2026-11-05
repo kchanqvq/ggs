@@ -38,6 +38,7 @@
   :serial t
   :depends-on (:alexandria
                :serapeum
+               :trivia
                :ggs/common
                :lp-hash-table
                :metabang-bind
