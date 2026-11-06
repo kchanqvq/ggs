@@ -50,7 +50,8 @@ The rule (lhs rhs :guard condition) is equivalent to the :EVAL rule
 
 Backends should `macrolet' bind this placeholder inside `defrw', `defrw*' and `define-analysis'."
   (declare (ignore term))
-  (error "Analysis accessor ~a can only be used inside `defrw', `defrw*' or `define-analysis'." name))
+  (error "Analysis accessor ~S can only be used inside `defrw', `defrw*' or `define-analysis'."
+         name))
 
 (defmacro define-analysis ((name &key merge bottom (type t)) &body clauses)
   "Define analysis NAME and a macro NAME that takes a single term argument and
@@ -64,7 +65,7 @@ Each CLAUSE should be of form (PAT BODY...). BODY should evaluates to the
 analysis value for the term matching PAT."
   `(progn
      (defmacro ,name (term)
-       ,(format nil "Return ~a analysis value for TERM.
+       ,(format nil "Return ~A analysis value for TERM.
 
 Can only be used inside `defrw', `defrw*' or `define-analysis'."
                 name)
@@ -85,7 +86,7 @@ Can only be used inside `defrw', `defrw*' or `define-analysis'."
 (declaim (inline make-or-test or-eql or-equal))
 (defun make-or-test (test)
   (lambda (x y)
-    (if x (if y (if (funcall test x y) x (error "Conflicting values: ~a vs ~a" x y)) x) y)))
+    (if x (if y (if (funcall test x y) x (error "Conflicting values: ~S vs ~S" x y)) x) y)))
 
 ;; At least SBCL has no problem fully inline these...
 (defun or-eql (x y)

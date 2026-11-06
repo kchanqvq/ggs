@@ -20,7 +20,8 @@
   (destructuring-bind (slot-var &optional index-var) (ensure-list slot-var)
     (once-only (variadic-structure)
       (with-gensyms (i)
-        `(loop for ,i of-type fixnum from ,offset below (length (the simple-vector ,variadic-structure))
+        `(loop for ,i of-type fixnum
+               from ,offset below (length (the simple-vector ,variadic-structure))
                ,@(when index-var `(for ,index-var of-type fixnum from 0))
                do (let ((,slot-var (svref ,variadic-structure ,i)))
                     ,@body)
@@ -39,12 +40,14 @@
   `(svref ,variadic-structure (+ ,i ,offset)))
 
 (declaim (inline variadic-slots-between variadic-slot-from-end))
-(defun variadic-slots-between (from-start from-end offset node)
-  (loop for i from (+ offset from-start) to (- (length node) from-end)
-        collect (svref node i)))
-
 (defun variadic-slot-from-end (from-end node)
-  (svref node (- (length node) from-end)))
+  "Variadic slot FROM-END of NODE counting from the end (0 is the last)."
+  (svref node (- (length node) (1+ from-end))))
+
+(defun variadic-slots-between (from-start from-end offset node)
+  "Variadic slots of NODE from FROM-START to FROM-END."
+  (loop for i from (+ offset from-start) to (- (length node) (1+ from-end))
+        collect (svref node i)))
 
 (defun list-form-items (form)
   "Normalize mix of `append', `list' and `list*' into a list of (LIST SINGLE-ITEM)
@@ -104,13 +107,19 @@ alike"
                                        (error "~S is not a variadic structure." include)))
                                  own-slots))
          (last-slot (lastcar slot-and-options))
-         (singular (if (listp (car last-slot)) (caar last-slot) (car last-slot)))
-         (plural (if (listp (car last-slot)) (cadar last-slot) (format nil "~aS" (car last-slot))))
+         (singular (if (listp (car last-slot))
+                       (caar last-slot)
+                       (car last-slot)))
+         (plural (if (listp (car last-slot))
+                     (cadar last-slot)
+                     (format nil "~aS" (car last-slot))))
          (offset-const (format-symbol t "+~a-~a-OFFSET+" name plural))
          (do-args (format-symbol t "DO-~a-~a" name plural))
          (predicate (format-symbol t "~a-P" name))
          (constructor-option (assoc :constructor options))
-         (make (if constructor-option (cadr constructor-option) (format-symbol t "MAKE-~a" name)))
+         (make (if constructor-option
+                   (cadr constructor-option)
+                   (format-symbol t "MAKE-~a" name)))
          (arg-var (format-symbol t "~a-VAR" singular))
          (name-var (format-symbol t "~a-VAR" name))
          (map-args (format-symbol t "MAP-~a-~a" name plural))
@@ -146,7 +155,8 @@ alike"
                  do (setf (svref new i) a))
            new))
        (define-compiler-macro ,make
-           (&whole form &key ,@(mapcar (lambda (slot) `(,(car slot) ',(cadr slot))) ordinary-slots)
+           (&whole form &key ,@(mapcar (lambda (slot) `(,(car slot) ',(cadr slot)))
+                                       ordinary-slots)
                           (offset ,offset-const) (n-args nil n-args-p) (args nil args-p))
          (declare (ignore n-args))
          (when (and n-args-p args-p)

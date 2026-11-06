@@ -39,6 +39,19 @@
   ((?f ??xs ?y) (+ 1 (length ??xs) (* 10 (last-heavy ?y))))
   ((?f) 1))
 
+;; Fixed arguments on both sides of a sequence variable.
+(define-analysis (ends-heavy :merge #'min :bottom +inf-cost+ :type cost)
+  ((?f ?x ??xs ?y) (+ 1 (length ??xs) (* 2 (ends-heavy ?x)) (* 3 (ends-heavy ?y))))
+  ((?f ?x) (+ 1 (ends-heavy ?x)))
+  ((?f) 1))
+
+(defun tree-ends-heavy (term)
+  (cond ((atom term) 1)
+        ((null (cddr term)) (+ 1 (tree-ends-heavy (second term))))
+        (t (+ 1 (- (length term) 3)
+              (* 2 (tree-ends-heavy (second term)))
+              (* 3 (tree-ends-heavy (lastcar term)))))))
+
 (defun tree-fanout (term)
   (if (consp term) (length term) 1))
 
@@ -58,7 +71,7 @@
 
 (defparameter *references*
   '((size . tree-size) (depth . tree-depth) (weighted . tree-weighted)
-    (fanout . tree-fanout) (last-heavy . tree-last-heavy)))
+    (fanout . tree-fanout) (last-heavy . tree-last-heavy) (ends-heavy . tree-ends-heavy)))
 
 (defun reference-cost (analysis term)
   (funcall (cdr (assoc analysis *references*)) term))

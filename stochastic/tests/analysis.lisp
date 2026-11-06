@@ -114,13 +114,14 @@ the variables of LHS, as a rule's weight computes it."
   (check-templates 'templates *templates* 'weighted))
 
 ;; Sequence variables in templates, and arguments matched by the sequence
-;; variables of FANOUT and LAST-HEAVY.  Those need every argument at run time,
+;; variables of FANOUT, LAST-HEAVY and ENDS-HEAVY.  Those need every argument at run time,
 ;; so these templates have no compound arguments.
 (def-template-rules seq-templates
   ((f ?x ??xs) (g ??xs))
   ((f ?x ??xs) (g ?x ??xs))
   ((f ?x ??xs) (g ??xs ?x 0))
   ((f ?x ??xs) (g ??xs a ??xs))
+  ((f ?x ??xs) (g a ??xs ?x))
   ((f ?x ?y) (g ?y ?x a)))
 
 (def-test template-costs-sequence-variables ()
@@ -129,7 +130,8 @@ the variables of LHS, as a rule's weight computes it."
     (check-templates 'seq-templates *seq-templates* 'size)
     (check-templates 'seq-templates *seq-templates* 'weighted))
   (check-templates 'seq-templates *seq-templates* 'fanout)
-  (check-templates 'seq-templates *seq-templates* 'last-heavy))
+  (check-templates 'seq-templates *seq-templates* 'last-heavy)
+  (check-templates 'seq-templates *seq-templates* 'ends-heavy))
 
 (def-test constant-analysis ()
   ;; A constant has no node; its analysis comes from the constant clauses.

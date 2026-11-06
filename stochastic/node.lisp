@@ -46,7 +46,8 @@
 
 (defmacro def-search-rewrite (name accessor type)
   `(progn
-     (declaim (ftype (function (rose-node fixnum ,type (function (t ,type fixnum) t)
+     (declaim (ftype (function (rose-node fixnum ,type
+                                (function (t ,type finalize-node-fn fixnum) t)
                                 finalize-node-fn fixnum)
                                t)
                      ,name))
@@ -64,7 +65,8 @@
                               (funcall finalize-node
                                        (node-replace-arg node i (process arg value) offset)
                                        beta-constant))))))
-                  (return-from process (funcall rewrite-fn node value beta-constant))))
+                  (return-from process
+                    (funcall rewrite-fn node value finalize-node beta-constant))))
          (process node value)))))
 
 (declaim (inline search-rewrite-n-rewrites search-rewrite-weight))

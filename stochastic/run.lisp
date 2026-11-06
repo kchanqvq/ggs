@@ -43,8 +43,7 @@
                                           (if (seq-var-p arg) arg `(list ,(process arg))))
                                         (cdr tmpl)))))
                   `(if ,(if (find-if-not #'seq-var-p (cdr tmpl)) t `(or ,@(cdr tmpl)))
-                       (finalize-node (make-rose-node :offset ,offset :fsym ,fsym :args ,args)
-                                      beta-constant)
+                       (%finalize-node (make-rose-node :offset ,offset :fsym ,fsym :args ,args))
                        ,fsym)))
                ((var-p tmpl) tmpl)
                (t `',tmpl))))
@@ -58,115 +57,127 @@
             :format-arguments (list proxy-cost type))))
 
   (bind ((offset (+ +rose-node-args-offset+ (length analyses-alist)))
-         ((:flet wrap-user-decls (rule))
-          `(,(car rule) (locally (declare ,@user-decls) ,@(cdr rule))))
-         (compound-matcher `(do-match* ,offset compound subject
-                              ,@(mapcar #'wrap-user-decls rules)))
-         (constant-matcher `(do-match* ,offset constant arg
-                              ,@(mapcar #'wrap-user-decls rules))))
+         (macrolets `((get-analysis-data (name term &environment env)
+                        (expand-analysis-access ,offset name ',analyses-alist term env))
+                      (term (tmpl)
+                            (expand-template tmpl ,offset))))
+         (rules (mapcar (lambda (rule)
+                          `(,(car rule) (locally (declare ,@user-decls) ,@(cdr rule))))
+                        rules)))
 
     ;; FIXME: skip trailing constant loop if constant-matcher can never match
-    `(lambda ()
-       (declare (optimize speed (safety 0)))
-       (macrolet ((get-analysis-data (name term &environment env)
-                    (expand-analysis-access ,offset name ',analyses-alist term env))
-                  (term (tmpl)
-                    (expand-template tmpl ,offset)))
-         (labels ((finalize-node (subject beta-constant)
-                    (declare (rose-node subject)
-                             (fixnum beta-constant)
-                             (ignorable beta-constant))
-                    (macrolet ((yield-rewrite (rhs)
-                                 `(locally (declare (optimize speed (safety 0)))
-                                    (incf (rose-node-n-rewrites subject))
-                                    (incf (rose-node-weight subject)
-                                          (fastexp2 (- cost (get-analysis-data ,',proxy-cost
-                                                                               (term ,rhs)))
-                                                    beta-constant)))))
+    `(finalize-node
+      (lambda (subject beta-constant)
+        (declare (optimize speed (safety 0)))
+        ;; LABELS so that nodes built while computing analyses can call
+        ;; `finalize-node' itself
+        (labels ((finalize-node (subject beta-constant)
+                   (declare (rose-node subject)
+                            (fixnum beta-constant)
+                            (ignorable beta-constant))
+                   (macrolet (,@macrolets
+                              (%finalize-node (node)
+                                `(finalize-node ,node beta-constant))
+                              (yield-rewrite (rhs)
+                                `(locally (declare (optimize speed (safety 0)))
+                                   (incf (rose-node-n-rewrites subject))
+                                   (incf (rose-node-weight subject)
+                                         (fastexp2
+                                          (- cost (get-analysis-data ,',proxy-cost (term ,rhs)))
+                                          beta-constant)))))
 
-                      ;; rewrites inside the arguments
-                      (setf (rose-node-n-rewrites subject) 0)
-                      (do-variadic-slots (arg ,offset subject)
-                        (when (rose-node-p arg)
-                          (incf (rose-node-n-rewrites subject) (rose-node-n-rewrites arg))
-                          (incf (rose-node-weight subject) (rose-node-weight arg))))
+                     ;; rewrites inside the arguments
+                     (setf (rose-node-n-rewrites subject) 0)
+                     (do-variadic-slots (arg ,offset subject)
+                       (when (rose-node-p arg)
+                         (incf (rose-node-n-rewrites subject) (rose-node-n-rewrites arg))
+                         (incf (rose-node-weight subject) (rose-node-weight arg))))
 
-                      ;; compute analyses
-                      (setf ,@(loop for (_ . analysis) in analyses-alist
-                                    for i from 0
-                                    append
-                                    `((svref subject (+ +rose-node-args-offset+ ,i))
-                                      ,(expand-analysis offset analysis 'compound 'subject))))
+                     ;; compute analyses
+                     (setf ,@(loop for (_ . analysis) in analyses-alist
+                                   for i from 0
+                                   append
+                                   `((svref subject (+ +rose-node-args-offset+ ,i))
+                                     ,(expand-analysis offset analysis 'compound 'subject))))
 
-                      ;;compute weights
-                      (let ((cost (get-analysis-data ,proxy-cost subject)))
-                        (declare (type cost cost) (ignorable cost))
-                        ,compound-matcher)
+                     ;;compute weights
+                     (let ((cost (get-analysis-data ,proxy-cost subject)))
+                       (declare (type cost cost) (ignorable cost))
+                       (do-match* ,offset compound subject ,@rules))
 
-                      (do-variadic-slots (arg ,offset subject)
-                        (unless (rose-node-p arg)
-                          (let ((cost (get-analysis-data ,proxy-cost arg)))
-                            (declare (type cost cost) (ignorable cost))
-                            ,constant-matcher)))
-                      subject))
+                     (do-variadic-slots (arg ,offset subject)
+                       (unless (rose-node-p arg)
+                         (let ((cost (get-analysis-data ,proxy-cost arg)))
+                           (declare (type cost cost) (ignorable cost))
+                           (do-match* ,offset constant arg ,@rules))))
+                     subject)))
+          (finalize-node subject beta-constant)))
 
-                  (sample-inf-temp (subject n-rewrites beta-constant)
-                    (declare (rose-node subject)
-                             (fixnum n-rewrites beta-constant)
-                             (ignorable n-rewrites beta-constant))
-                    (macrolet ((yield-rewrite (rhs)
-                                 `(locally (declare (optimize speed (safety 0)))
-                                    (decf n-rewrites)
-                                    (when (minusp n-rewrites)
-                                      (return-from sample
-                                        (values (context (term ,rhs)) %current-ruleset%))))))
-                      (block sample
-                        (macrolet ((context (rhs) rhs))
-                          ,compound-matcher)
-                        (do-variadic-slots ((arg i) ,offset subject)
-                          (unless (rose-node-p arg)
-                            (macrolet ((context (rhs)
-                                         `(finalize-node (node-replace-arg subject i ,rhs ,',offset)
-                                                         beta-constant)))
-                              ,constant-matcher)))
-                        subject)))
+      sample-inf-temp
+      (lambda (subject n-rewrites finalize-node beta-constant)
+        (declare (optimize speed (safety 0))
+                 (rose-node subject)
+                 (fixnum n-rewrites beta-constant)
+                 (finalize-node-fn finalize-node)
+                 (ignorable n-rewrites finalize-node beta-constant))
+        (macrolet (,@macrolets
+                   (%finalize-node (node)
+                     `(funcall finalize-node ,node beta-constant))
+                   (yield-rewrite (rhs)
+                     `(locally (declare (optimize speed (safety 0)))
+                        (decf n-rewrites)
+                        (when (minusp n-rewrites)
+                          (return-from sample
+                            (values (context (term ,rhs)) %current-ruleset%))))))
+          (block sample
+            (macrolet ((context (rhs) rhs))
+              (do-match* ,offset compound subject ,@rules))
+            (do-variadic-slots ((arg i) ,offset subject)
+              (unless (rose-node-p arg)
+                (macrolet ((context (rhs)
+                             `(%finalize-node (node-replace-arg subject i ,rhs ,',offset))))
+                  (do-match* ,offset constant arg ,@rules))))
+            subject)))
 
-                  (sample-fin-temp (subject weight beta-constant)
-                    (declare (rose-node subject)
-                             (single-float weight)
-                             (fixnum beta-constant)
-                             (ignorable weight beta-constant))
-                    (macrolet ((yield-rewrite (rhs)
-                                 `(locally (declare (optimize speed (safety 0)))
-                                    (decf weight (fastexp2
-                                                  (- cost (get-analysis-data ,',proxy-cost
-                                                                             (term ,rhs)))
-                                                  beta-constant))
-                                    (when (minusp weight)
-                                      (return-from sample
-                                        (values (context (term ,rhs)) %current-ruleset%))))))
-                      (block sample
-                        (let ((cost (get-analysis-data ,proxy-cost subject)))
-                          (declare (type cost cost) (ignorable cost))
-                          (macrolet ((context (rhs) rhs))
-                            ,compound-matcher))
-                        (do-variadic-slots ((arg i) ,offset subject)
-                          (unless (rose-node-p arg)
-                            (let ((cost (get-analysis-data ,proxy-cost arg)))
-                              (declare (type cost cost) (ignorable cost))
-                              (macrolet ((context (rhs)
-                                           `(finalize-node (node-replace-arg subject i ,rhs ,',offset)
-                                                           beta-constant)))
-                                ,constant-matcher))))
-                        subject)))
+      sample-fin-temp
+      (lambda (subject weight finalize-node beta-constant)
+        (declare (optimize speed (safety 0))
+                 (rose-node subject)
+                 (single-float weight)
+                 (fixnum beta-constant)
+                 (finalize-node-fn finalize-node)
+                 (ignorable weight finalize-node beta-constant))
+        (macrolet (,@macrolets
+                   (%finalize-node (node)
+                     `(funcall finalize-node ,node beta-constant))
+                   (yield-rewrite (rhs)
+                     `(locally (declare (optimize speed (safety 0)))
+                        (decf weight
+                              (fastexp2
+                               (- cost (get-analysis-data ,',proxy-cost (term ,rhs)))
+                               beta-constant))
+                        (when (minusp weight)
+                          (return-from sample
+                            (values (context (term ,rhs)) %current-ruleset%))))))
+          (block sample
+            (let ((cost (get-analysis-data ,proxy-cost subject)))
+              (declare (type cost cost) (ignorable cost))
+              (macrolet ((context (rhs) rhs))
+                (do-match* ,offset compound subject ,@rules)))
+            (do-variadic-slots ((arg i) ,offset subject)
+              (unless (rose-node-p arg)
+                (let ((cost (get-analysis-data ,proxy-cost arg)))
+                  (declare (type cost cost) (ignorable cost))
+                  (macrolet ((context (rhs)
+                               `(%finalize-node (node-replace-arg subject i ,rhs ,',offset))))
+                    (do-match* ,offset constant arg ,@rules)))))
+            subject)))
 
-                  (get-cost (node)
-                    ,(expand-analysis-access offset cost analyses-alist 'node nil)))
-
-           (list 'finalize-node #'finalize-node
-                 'sample-inf-temp #'sample-inf-temp
-                 'sample-fin-temp #'sample-fin-temp
-                 'get-cost #'get-cost))))))
+      get-cost
+      (lambda (node)
+        (declare (optimize speed (safety 0)))
+        (macrolet (,@macrolets)
+          ,(expand-analysis-access offset cost analyses-alist 'node nil))))))
 
 (defun get-rules-resolve-symbols (name)
   (mapcan (lambda (rule)
@@ -188,13 +199,19 @@ PROXY-COST and ANALYSES (unevaluated)."
   (let ((rules (get-rules-resolve-symbols name))
         (user-decls (get-user-decls env))
         (analyses-alist (analyses-alist cost proxy-cost analyses)))
-    `(let ((rules ',rules))
+    `(let ((rules ',rules)
+           (analyses-alist ',analyses-alist))
        (unless (equal rules (get-rules-resolve-symbols ',name))
-         (warn "Rule set ~A changed between compile and load time" ',name))
-       (setf (gethash (list rules ',cost ',proxy-cost ',analyses-alist ',user-decls)
+         (warn "Rule set ~S changed between compile and load time" ',name))
+       (unless (equal analyses-alist (analyses-alist ',cost ',proxy-cost ',analyses))
+         (warn "Analysis definitions for ~S changed between compile and load time" ',analyses))
+       (setf (gethash (list rules ',cost ',proxy-cost analyses-alist ',user-decls)
                       *compiled-rule-sets*)
-             (funcall ,(compute-rule-set-lambda
-                        rules cost proxy-cost analyses-alist user-decls))))))
+             (list ,@(collecting
+                       (doplist (key lambda (compute-rule-set-lambda
+                                             rules cost proxy-cost analyses-alist user-decls))
+                         (collect `',key)
+                         (collect lambda))))))))
 
 (defun compiled-rule-set (name cost proxy-cost analyses-alist)
   (let ((rules (get-rules-resolve-symbols name))
@@ -202,7 +219,7 @@ PROXY-COST and ANALYSES (unevaluated)."
         (analyses (remove proxy-cost (remove cost (mapcar #'car analyses-alist)))))
     (ensure-gethash (list rules cost proxy-cost analyses-alist user-decls)
                     *compiled-rule-sets*
-                    (progn
+                    (collecting
                       (warn 'runtime-compile-warning
                             :form `(precompile-stochastic-rule-set
                                     ,name ,cost
@@ -210,9 +227,10 @@ PROXY-COST and ANALYSES (unevaluated)."
                                         `((:proxy-cost ,proxy-cost)))
                                     ,@(when analyses
                                         `((:analyses ,analyses)))))
-                      (funcall (compile nil
-                                        (compute-rule-set-lambda
-                                         rules cost proxy-cost analyses-alist user-decls)))))))
+                      (doplist (key lambda (compute-rule-set-lambda
+                                            rules cost proxy-cost analyses-alist user-decls))
+                        (collect key)
+                        (collect (compile nil lambda)))))))
 
 (defun stochastic-search-1
     (init-term rule-set cost
@@ -221,7 +239,7 @@ PROXY-COST and ANALYSES (unevaluated)."
        (target-cost 0) max-time (max-restart 64)
        (proxy-cost cost) analyses
        verbose save-cost-history save-full-history)
-  (declare ((or null integer) soft-stall max-restart)
+  (declare ((or null integer) soft-stall max-stall max-restart)
            (integer hard-walk soft-walk)
            (single-float beta))
   (bind ((analyses-alist (analyses-alist cost proxy-cost analyses))
@@ -237,9 +255,9 @@ PROXY-COST and ANALYSES (unevaluated)."
          (last-fired-ruleset nil) ; recorded for :SAVE-FULL-HISTORY
          ((:flet wrap-sampler (s))
           (if save-full-history
-              (lambda (subject weight beta-constant)
+              (lambda (subject weight finalize-node beta-constant)
                 (multiple-value-bind (result ruleset)
-                    (funcall s subject weight beta-constant)
+                    (funcall s subject weight finalize-node beta-constant)
                   (setq last-fired-ruleset ruleset)
                   result))
               s))
@@ -341,7 +359,7 @@ PROXY-COST and ANALYSES (unevaluated)."
                           n-stall-soft 0))
 
                   ;; Check for restart
-                  (unless (and (< n-stall max-stall)
+                  (unless (and (or (not max-stall) (< n-stall max-stall))
                                (< cost +inf-cost+))
                     (when verbose
                       (format t "~&Iteration ~a/~a restart ~a ~a~%"
@@ -401,22 +419,31 @@ PROXY-COST and ANALYSES (unevaluated)."
 (defun stochastic-search
     (term rule-set cost &rest args
      &key (seed 0) (stride 1)
-       (beta 2.0) (soft-walk 0) (soft-stall nil) (hard-walk soft-walk) (max-restart 64)
-       (target-cost 0) max-time (max-stall 16000)
+       (beta 2.0) (soft-walk 0) (soft-stall nil) (hard-walk soft-walk) (max-stall 16000)
+       (target-cost 0 target-cost-p) (max-time nil max-time-p) (max-restart 64 max-restart-p)
        (proxy-cost cost) analyses
        verbose save-cost-history save-full-history
        (nproc 1) workers)
   "Search for a term equivalent to TERM under RULE-SET that minimises COST.
 
-COST and PROXY-COST (default COST) name DEFINE-ANALYSIS analyses whose values are
-costs: define them with :MERGE #'MIN, :BOTTOM +INF-COST+ and :TYPE COST.  The
-search restarts on reaching a cost of +INF-COST+ or more.  It minimises COST
-and weights rewrites by PROXY-COST.  ANALYSES names further analyses the rules
-use.  Return the best cost, the best term and a plist of statistics."
-  (declare (ignore beta
-                   max-stall max-restart soft-stall hard-walk
-                   target-cost max-time
+COST and PROXY-COST (default COST) name DEFINE-ANALYSIS analyses whose values
+are costs: define them with :MERGE #'MIN, :BOTTOM +INF-COST+ and :TYPE
+COST. PROXY-COST is used to compute probabilities.  ANALYSES names further
+analyses the rules use.  Return the best cost, the best term and a plist of
+statistics.
+
+Budget parameters TARGET-COST, MAX-TIME and MAX-RESTART controls when the
+overall search process stops. If none of these is provided, we default to
+MAX-RESTART=64."
+  (declare (ignore beta soft-stall hard-walk max-stall
+                   target-cost max-time max-restart
                    verbose save-cost-history save-full-history))
+
+  ;; If user sets any budget parameter, don't set MAX-RESTART=64.
+  (unless max-restart-p
+    (when (or target-cost-p max-time-p)
+      (setf (getf args :max-restart) nil)))
+
   (cond (workers
          (let ((n-workers (length workers)))
            (multiple-value-bind (nproc rem) (floor nproc n-workers)

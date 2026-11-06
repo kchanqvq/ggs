@@ -38,8 +38,8 @@ evaluate CONT-EXPR."
               (case (if seq-var-pos (signum (- i seq-var-pos)) -1)
                 (-1 `(,lisp-arg-var (enode-arg ,i ,node-var)))
                 (0 `(,lisp-arg-var
-                     (variadic-slots-between ,i ,(- n-args i)+enode-args-offset+ ,node-var)))
-                (1 `(,lisp-arg-var (variadic-slot-from-end ,(- n-args i) ,node-var)))))
+                     (variadic-slots-between ,i ,(- n-args i 1) +enode-args-offset+ ,node-var)))
+                (1 `(,lisp-arg-var (variadic-slot-from-end ,(- n-args i 1) ,node-var)))))
              ;; What happens after NODE-VAR is bound
              (body
               ;; We check arity first, and SBCL seems to know to eliminate SVREF
