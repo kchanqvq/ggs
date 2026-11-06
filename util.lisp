@@ -40,8 +40,7 @@
 
 (declaim (inline variadic-slots-between variadic-slot-from-end))
 (defun variadic-slots-between (from-start from-end offset node)
-  (loop for i from (+ offset from-start)
-          to (- (length node) from-end)
+  (loop for i from (+ offset from-start) to (- (length node) from-end)
         collect (svref node i)))
 
 (defun variadic-slot-from-end (from-end node)
@@ -64,12 +63,12 @@ or MULTIPLE-ITEM."
 (defun expand-make (args fixed offset)
   (let* ((items (list-form-items args))
          (vars (make-gensym-list (length items))))
-    (if (notevery #'single-item-p items)
+    (if (not (and (every #'single-item-p items) (integerp offset)))
         `(let* (,@(mapcar (lambda (item var)
                             `(,var ,(if (single-item-p item) (second item) item)))
                           items vars)
                 (new (make-array
-                      (+ ,(+ offset (count-if #'single-item-p items))
+                      (+ (+ ,offset ,(count-if #'single-item-p items))
                          ,@(mappend (lambda (item var)
                                       (unless (single-item-p item) `((length ,var))))
                                     items vars))))
@@ -87,7 +86,8 @@ or MULTIPLE-ITEM."
                                 (incf i)))))
                       items vars)
            new)
-        `(vector ,@fixed ,@(mapcar #'second items)))))
+        `(vector ,@fixed ,@(make-list (- offset (length fixed)) :initial-element 0)
+                 ,@(mapcar #'second items)))))
 
 (defmacro define-variadic-structure (name-and-options &body slot-and-options)
   "Supports :INCLUDE, child structures inherits all slots *except* the variadic
@@ -133,25 +133,26 @@ alike"
          (and (typep obj 'simple-vector) (>= (length obj) ,offset-const)))
        (defun ,make (&key ,@(mapcar (lambda (slot) `(,(car slot) ,(cadr slot)))
                                     ordinary-slots)
-                       (n-args nil n-args-p) (args nil args-p))
-         (declare (list args))
+                       (offset ,offset-const) (n-args nil n-args-p) (args nil args-p))
+         (declare (list args)
+                  (fixnum offset))
          (when (and n-args-p args-p)
            (error "Can't specify both :N-ARGS and :ARGS."))
-         (let ((new (make-array (+ ,offset-const (if args-p (length args) (or n-args 0))))))
+         (let ((new (make-array (+ offset (if args-p (length args) (or n-args 0))))))
            (setf ,@(loop for slot in ordinary-slots
                          for i from 0
                          appending `((svref new ,i) ,(car slot))))
-           (loop for a in args for i of-type fixnum from ,offset-const
+           (loop for a in args for i of-type fixnum from offset
                  do (setf (svref new i) a))
            new))
        (define-compiler-macro ,make
            (&whole form &key ,@(mapcar (lambda (slot) `(,(car slot) ',(cadr slot))) ordinary-slots)
-                          (n-args nil n-args-p) (args nil args-p))
+                          (offset ,offset-const) (n-args nil n-args-p) (args nil args-p))
          (declare (ignore n-args))
          (when (and n-args-p args-p)
            (error "Can't specify both :N-ARGS and :ARGS."))
          (if args-p
-             (expand-make args (list ,@(mapcar #'car ordinary-slots)) ,offset-const)
+             (expand-make args (list ,@(mapcar #'car ordinary-slots)) offset)
              form))
        (defmacro ,do-args ((,arg-var ,name-var &optional result) &body body)
          `(do-variadic-slots (,,arg-var ,',offset-const ,,name-var ,result) ,@body))

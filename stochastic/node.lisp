@@ -8,14 +8,19 @@
   (fsym)
   (arg))
 
-(defun term-node (term offset)
-  (let ((pad (make-list (- offset +rose-node-args-offset+) :initial-element 0)))
-    (labels ((process (term)
-               (cond ((atom term) term)
-                     ((null (cdr term)) (car term))
-                     (t (make-rose-node :fsym (car term)
-                                        :args (append pad (mapcar #'process (cdr term))))))))
-      (process term))))
+(deftype finalize-node-fn ()
+  `(function (rose-node fixnum) rose-node))
+
+(defun term-node (term offset finalize-node beta-constant)
+  (labels ((process (term)
+             (cond ((atom term) term)
+                   ((null (cdr term)) (car term))
+                   (t (funcall finalize-node
+                               (make-rose-node :offset offset
+                                               :fsym (car term)
+                                               :args (mapcar #'process (cdr term)))
+                               beta-constant)))))
+    (process term)))
 
 (defun node-term (term offset)
   (if (rose-node-p term)
@@ -41,9 +46,11 @@
 
 (defmacro def-search-rewrite (name accessor type)
   `(progn
-     (declaim (ftype (function (rose-node fixnum ,type (function (t ,type) t)) t)
+     (declaim (ftype (function (rose-node fixnum ,type (function (t ,type fixnum) t)
+                                finalize-node-fn fixnum)
+                               t)
                      ,name))
-     (defun ,name (node offset value rewrite-fn)
+     (defun ,name (node offset value rewrite-fn finalize-node beta-constant)
        (labels ((process (node value)
                   (declare (optimize speed)
                            (rose-node node)
@@ -54,8 +61,10 @@
                         (if (<= a-value value)
                             (decf value a-value)
                             (return-from process
-                              (node-replace-arg node i (process arg value) offset))))))
-                  (return-from process (funcall rewrite-fn node value))))
+                              (funcall finalize-node
+                                       (node-replace-arg node i (process arg value) offset)
+                                       beta-constant))))))
+                  (return-from process (funcall rewrite-fn node value beta-constant))))
          (process node value)))))
 
 (declaim (inline search-rewrite-n-rewrites search-rewrite-weight))

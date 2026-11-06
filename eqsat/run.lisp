@@ -29,7 +29,7 @@
                       `(enode-merge top-node ,(expand-template rhs))))
            (locally (declare ,@user-decls) ,@(cdr rule)))))))
 
-(defvar *compiled-rules* (make-hash-table :test 'equal))
+(defparameter *compiled-rules* (make-hash-table :test 'equal))
 
 (defmacro precompile-eqsat-rule-set (name &environment env)
   (let ((rules (get-rules name))

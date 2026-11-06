@@ -303,7 +303,8 @@
   ((?f) 1))
 
 (def-test untyped-cost-warns ()
-  (signals style-warning
-    (ggs/stochastic::compute-rule-set-lambda
-     (ggs/util:get-rules 'cancel) 'untyped-size 'untyped-size
-     (ggs/stochastic::analyses-alist 'untyped-size 'untyped-size nil) nil)))
+  ;; Compiling the rule set warns.  Leaving at the warning keeps the rule set
+  ;; uncompiled, so the test still warns when run again.
+  (is (search "not a subtype of COST"
+              (handler-case (progn (search* '(+ x 0) 'cancel 'untyped-size) "no warning")
+                (style-warning (c) (princ-to-string c))))))

@@ -54,7 +54,7 @@
                   clauses-by-fsym)))
            result)))))
 
-(defvar *compiled-makes* (make-hash-table :test 'equal))
+(defparameter *compiled-makes* (make-hash-table :test 'equal))
 
 (defun compiled-analysis (name)
   (bind (((:plist merge-form bottom clauses type) (get-analysis name))

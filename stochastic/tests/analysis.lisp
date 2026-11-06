@@ -1,9 +1,13 @@
 (in-package :ggs/stochastic/tests)
 
-;;; The analysis compiler: a right-hand side's cost is computed at compile time
-;;; by matching the template statically (do-match* on a term form), while a new
-;;; node's analyses are computed at run time by RECOMPUTE-ROSE.  Both must agree
-;;; with each other and with the reference.
+;;; The analysis compiler, through the public interface.  A rule's weight uses
+;;; the analysis of its right-hand side computed at compile time, by matching
+;;; the template statically, while the search reports the analysis of the node
+;;; it builds.  Both must agree with each other and with the reference.
+;;;
+;;; A probe rule reads the static analysis: its :EVAL body is compiled with the
+;;; same macros as a rule's weight, so (SIZE (TERM <template>)) there is the
+;;; cost a weight would use.  The probe never rewrites.
 
 (def-suite* :stochastic-analysis :in :ggs/stochastic)
 
@@ -36,12 +40,14 @@
   '(() (c) (5 (h c)) ((k (h c) d) c (pow c 3)))
   "Term lists bound to the sequence variables.")
 
-(defun template-vars (template)
-  (remove-duplicates (remove-if-not #'ggs/util:var-p (flatten template))))
+(defun probe-vars (lhs)
+  "The variables of LHS, the sequence variable last."
+  (let ((vars (remove-duplicates (remove-if-not #'ggs/util:var-p (flatten lhs)))))
+    (append (remove-if #'ggs/util:seq-var-p vars) (remove-if-not #'ggs/util:seq-var-p vars))))
 
 (defun instantiate (template bindings)
   "TEMPLATE with BINDINGS substituted, splicing sequence variables.  A compound
-term left without arguments is its function symbol, as in EXPAND-TEMPLATE."
+term left without arguments is its function symbol, as the search builds it."
   (cond ((consp template)
          (let ((term (mapcan (lambda (x)
                                (if (ggs/util:seq-var-p x)
@@ -58,54 +64,47 @@ term left without arguments is its function symbol, as in EXPAND-TEMPLATE."
         for pool = (if (ggs/util:seq-var-p var) *sample-sequences* *sample-bindings*)
         collect (cons var (nth (mod i (length pool)) pool))))
 
-(defun rule-set-context (rule-set analysis)
-  "Offset, analyses alist and compiled rule set used by STOCHASTIC-SEARCH."
-  (let* ((alist (ggs/stochastic::analyses-alist analysis analysis nil))
-         (offset (+ ggs/stochastic::+rose-node-args-offset+ (length alist))))
-    (values offset alist
-            (handler-bind ((runtime-compile-warning #'muffle-warning))
-              (ggs/stochastic::compiled-rule-set rule-set analysis analysis alist)))))
+(defvar *probed* '()
+  "(INDEX . ANALYSIS) recorded by probe rules.")
 
-(defun make-node (term offset rule-set-plist)
-  "TERM as rose nodes with their analyses filled in."
-  (let ((node (ggs/stochastic::term-node term offset)))
-    (ggs/stochastic::recompute-rose node offset (getf rule-set-plist 'ggs/stochastic::compute-weights)
-                                    (ggs/stochastic::constant-for-fastexp2 (exp 1.0)))
-    node))
+(defun probe-rule-set (name rules analysis)
+  "Define rule set NAME with a probe for each of RULES.  Probe I matches
+\(PROBE I . <variables of the left-hand side>) and records ANALYSIS of the
+right-hand side."
+  (eval `(defrw* ,name
+           ,@(loop for (lhs rhs) in rules
+                   for i from 0
+                   collect `((probe ,i ,@(probe-vars lhs))
+                             :eval (push (cons ,i (,analysis (ggs/util:term ,rhs))) *probed*)))))
+  name)
 
-(defun static-cost (template analysis offset alist bindings rule-set-plist)
-  "ANALYSIS of TEMPLATE computed the way a rule's weight computes it."
-  (let* ((vars (mapcar #'car bindings))
-         (f (handler-bind ((warning #'muffle-warning))
-              (compile nil `(lambda ,vars
-                              (declare (ignorable ,@vars))
-                              ;; The MACROLETS of COMPUTE-RULE-SET-LAMBDA
-                              (macrolet ((ggs/common::get-analysis-data (name term &environment env)
-                                           (ggs/stochastic::expand-analysis-access
-                                            ,offset name ',alist term env))
-                                         (ggs/util:term (tmpl)
-                                           (ggs/stochastic::expand-template tmpl ',alist)))
-                                (ggs/common::get-analysis-data ,analysis (ggs/util:term ,template))))))))
-    (apply f (mapcar (lambda (b)
-                       (if (ggs/util:seq-var-p (car b))
-                           (mapcar (lambda (term) (make-node term offset rule-set-plist)) (cdr b))
-                           (make-node (cdr b) offset rule-set-plist)))
-                     bindings))))
+(defun static-analysis (rule-set analysis i lhs bindings)
+  "ANALYSIS of the right-hand side of probe I in RULE-SET with BINDINGS for
+the variables of LHS, as a rule's weight computes it."
+  (let ((*probed* '()))
+    (search* `(probe ,i ,@(loop for var in (probe-vars lhs)
+                                for value = (cdr (assoc var bindings))
+                                if (ggs/util:seq-var-p var) append value
+                                  else collect value))
+             rule-set analysis)
+    (assert (= 1 (length *probed*)) () "Probe ~a ran ~a times" i (length *probed*))
+    (cdar *probed*)))
 
-(defun dynamic-cost (term offset rule-set-plist)
-  "ANALYSIS of TERM computed on its node, the way the search reads its objective."
-  (funcall (getf rule-set-plist 'ggs/stochastic::get-cost) (make-node term offset rule-set-plist)))
+(defun node-analysis (term analysis)
+  "ANALYSIS of TERM as the search reports it."
+  (nth-value 0 (search* term 'no-rules analysis)))
 
-(defun check-templates (rule-set rules analysis)
-  (multiple-value-bind (offset alist plist) (rule-set-context rule-set analysis)
+(defun check-templates (name rules analysis)
+  (let ((rule-set (probe-rule-set (symbolicate name '- analysis '-probes) rules analysis)))
     (loop for (lhs rhs) in rules
+          for i from 0
           do (loop for shift below (length *sample-bindings*)
-                   for bindings = (sample-bindings (template-vars lhs) shift)
+                   for bindings = (sample-bindings (probe-vars lhs) shift)
                    for instance = (instantiate rhs bindings)
                    for expected = (reference-cost analysis instance)
-                   do (is (= expected (static-cost rhs analysis offset alist bindings plist))
+                   do (is (= expected (static-analysis rule-set analysis i lhs bindings))
                           "static ~a of ~s with ~s" analysis rhs bindings)
-                      (is (= expected (dynamic-cost instance offset plist))
+                      (is (= expected (node-analysis instance analysis))
                           "node ~a of ~s" analysis instance)))))
 
 (def-test template-costs-size ()
@@ -134,17 +133,17 @@ term left without arguments is its function symbol, as in EXPAND-TEMPLATE."
 
 (def-test constant-analysis ()
   ;; A constant has no node; its analysis comes from the constant clauses.
-  (multiple-value-bind (offset alist plist) (rule-set-context 'templates 'weighted)
-    (declare (ignore alist))
-    (is (= 1 (dynamic-cost 'c offset plist)))
-    (is (= 1 (dynamic-cost 5 offset plist)))))
+  (is (= 1 (node-analysis 'c 'weighted)))
+  (is (= 1 (node-analysis 5 'weighted))))
 
 (def-test template-with-variable-fsym ()
   ;; ?G is only known at run time, but the template has arguments, so only the
   ;; compound clauses apply: the constant clause ((?F) 1) must not.
-  (multiple-value-bind (offset alist plist) (rule-set-context 'templates 'weighted)
+  (let* ((lhs '(p ?g ?x))
+         (rhs '(?g ?x (f ?x)))
+         (rule-set (probe-rule-set 'fsym-probes `((,lhs ,rhs)) 'weighted)))
     (dolist (g '(h pow))
       (let ((bindings `((?g . ,g) (?x . c))))
-        (is (= (tree-weighted (instantiate '(?g ?x (f ?x)) bindings))
-               (static-cost '(?g ?x (f ?x)) 'weighted offset alist bindings plist))
-            "static weighted of (?g ?x (f ?x)) with ?g = ~a" g)))))
+        (is (= (tree-weighted (instantiate rhs bindings))
+               (static-analysis rule-set 'weighted 0 lhs bindings))
+            "static weighted of ~s with ?g = ~a" rhs g)))))
