@@ -29,6 +29,9 @@
   (mapcar (lambda (a) (cons a (get-analysis a)))
           (remove-duplicates (list* proxy-cost cost analyses) :from-end t)))
 
+(defvar-unbound *last-fired-ruleset*
+  "Recorded for :SAVE-FULL-HISTORY.")
+
 (defun expand-template (tmpl offset)
   (labels ((process (tmpl)
              (cond
@@ -127,8 +130,8 @@
                      `(locally (declare (optimize speed (safety 0)))
                         (decf n-rewrites)
                         (when (minusp n-rewrites)
-                          (return-from sample
-                            (values (context (term ,rhs)) %current-ruleset%))))))
+                          (setq *last-fired-ruleset* %current-ruleset%)
+                          (return-from sample (context (term ,rhs)))))))
           (block sample
             (macrolet ((context (rhs) rhs))
               (do-match* ,offset compound subject ,@rules))
@@ -157,8 +160,8 @@
                                (- cost (get-analysis-data ,',proxy-cost (term ,rhs)))
                                beta-constant))
                         (when (minusp weight)
-                          (return-from sample
-                            (values (context (term ,rhs)) %current-ruleset%))))))
+                          (setq *last-fired-ruleset* %current-ruleset%)
+                          (return-from sample (context (term ,rhs)))))))
           (block sample
             (let ((cost (get-analysis-data ,proxy-cost subject)))
               (declare (type cost cost) (ignorable cost))
@@ -252,17 +255,7 @@ PROXY-COST and ANALYSES (unevaluated)."
                         (+ start-time
                            (* max-time internal-time-units-per-second))))
          (beta-constant (constant-for-fastexp2 (exp (/ beta 2))))
-         (last-fired-ruleset nil) ; recorded for :SAVE-FULL-HISTORY
-         ((:flet wrap-sampler (s))
-          (if save-full-history
-              (lambda (subject weight finalize-node beta-constant)
-                (multiple-value-bind (result ruleset)
-                    (funcall s subject weight finalize-node beta-constant)
-                  (setq last-fired-ruleset ruleset)
-                  result))
-              s))
-         (inf-sampler (wrap-sampler sample-inf-temp))
-         (fin-sampler (wrap-sampler sample-fin-temp))
+         (*last-fired-ruleset* nil)
          (init-node (progn
                       (unless (<= (* +inf-cost+ beta-constant) most-positive-fixnum)
                         (error "BETA ~A is too large." beta))
@@ -316,19 +309,19 @@ PROXY-COST and ANALYSES (unevaluated)."
                        (setq node
                              (search-rewrite-n-rewrites
                               node offset (random (rose-node-n-rewrites node))
-                              inf-sampler finalize-node beta-constant)))
+                              sample-inf-temp finalize-node beta-constant)))
                       (t
                        (setq node
                              (search-rewrite-weight
                               node offset (random (rose-node-weight node))
-                              fin-sampler finalize-node beta-constant))))
+                              sample-fin-temp finalize-node beta-constant))))
 
                 (incf n-accepted)
                 (let ((cost (funcall get-cost node)))
                   (when save-full-history
                     (push (list :term (node-term node offset)
                                 :cost cost
-                                :ruleset last-fired-ruleset)
+                                :ruleset *last-fired-ruleset*)
                           (car full-history)))
                   ;; Check for cost function decrease
                   (if (< cost best-cost-1)
