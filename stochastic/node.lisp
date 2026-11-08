@@ -72,3 +72,23 @@
 (declaim (inline search-rewrite-n-rewrites search-rewrite-weight))
 (def-search-rewrite search-rewrite-n-rewrites rose-node-n-rewrites fixnum)
 (def-search-rewrite search-rewrite-weight rose-node-weight single-float)
+
+(defun node-equal (x y offset)
+  (labels ((process (x y)
+             (cond
+               ((eq x y) t)
+               ((and (not (rose-node-p x)) (not (rose-node-p y))) (eql x y))
+               ((and (rose-node-p x) (rose-node-p y))
+                (unless (= (length x) (length y))
+                  (return-from process nil))
+                (unless (eql (rose-node-fsym x) (rose-node-fsym y))
+                  (return-from process nil))
+                (loop for i from offset below (length x)
+                      always (process (svref x i) (svref y i)))))))
+    (process x y)))
+
+(declaim (inline seq-equal))
+(defun seq-equal (xs ys offset)
+  (declare (type list xs ys))
+  (and (= (length xs) (length ys))
+       (every (lambda (x y) (node-equal x y offset)) xs ys)))

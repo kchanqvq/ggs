@@ -1,18 +1,86 @@
+;;;; Pattern matching compiler
+;;;
+;;; `do-match*' compiles multiple (PAT BODY...) clauses into a single decision
+;;; tree. This is used for both matching all rules in a rule-set simultaneously,
+;;; and for compiling analyses. For the analyses use case, the compiler also
+;;; partial evaluates over partially static subject. Therefore, analysis values
+;;; (especially cost analysis) over (TERM TMPL) can be computed without
+;;; materializing the term.
+;;;
+;;; `do-match*' itself handles renaming non-linear variables in lhs patterns and
+;;; renaming variables in partially static subject, then outsource to
+;;; `%do-match*'. The latter calls a number of functions (`expand-*') to compute
+;;; the expansion in essentially one macroexpand step. It would be tempting to
+;;; write some of these functions as macros to decompose into multiple
+;;; macroexpand steps. However, between macros, it's much easier to pass
+;;; information down than up (impossible?). Consider what would happen to
+;;; `*need-args*'.
+
 (in-package :ggs/stochastic)
 
+(defmacro do-match* (offset category subject &body clauses &environment env)
+  "Match SUBJECT against CLAUSES, each of the form (PAT BODY...).
+
+At runtime, SUBJECT should be either an unboxed constant or a variadic structure
+inheriting `rose-node', and OFFSET should be an expansion-time constant number
+that locates ARGS slots in SUBJECT. Partial evaluate if SUBJECT is partially
+static, i.e. of form (TERM TMPL).
+
+CATEGORY can be one of T, CONSTANT, COMPOUND. If CATEGORY is CONSTANT, SUBJECT
+is assumed to be an unboxed constant at runtime; similarly for COMPOUND. If
+CATEGORY is T, assume either of the two cases may happen."
+  (bind ((subject (term-form-from-env subject env))
+         ;; Rename any variables in SUBJECT to avoid variable capture
+         ((:values bindings subject)
+          (if (term-form-p subject)
+              (let ((renames (mapcar (lambda (var) (cons var (gensym-1 var)))
+                                     (remove-duplicates
+                                      (remove-if-not #'var-p (flatten subject))))))
+                (values (mapcar (lambda (r) (list (cdr r) (car r))) renames)
+                        (sublis renames subject)))
+              (let ((var (gensym "SUBJECT")))
+                (values `((,var ,subject)) var)))))
+    `(let ,bindings
+       (declare (ignorable ,@(mapcar #'car bindings)))
+       (%do-match* ,offset ,category (,subject)
+         ,@(mapcar (lambda (clause)
+                     (bind (((pat . body) clause))
+                       (multiple-value-list
+                        (decompose-consistency-check pat offset body))))
+                   clauses)))))
+
+(defun decompose-consistency-check (pat offset body)
+  "For a `do-match*' clause like (PAT BODY...), rename all non-linear variables
+in PAT to distinct linear ones, and wrap BODY with variable consistency checks.
+Return the renamed pattern and wrapped BODY (a single form)."
+  (let (vars checks)
+    (labels ((process-var (var)
+               (cond ((member var vars)
+                      (lret ((new-var (gensym-1 var)))
+                        (push `(,(if (seq-var-p var) 'seq-equal 'node-equal)
+                                ,var ,new-var ,offset)
+                              checks)))
+                     (t (push var vars)
+                        var)))
+             (process (pat)
+               (cond ((consp pat)
+                      (cons (if (var-p (car pat)) (process-var (car pat)) (car pat))
+                            (mapcar #'process (cdr pat))))
+                     ((var-p pat) (process-var pat))
+                     (t pat))))
+      (values (process pat) `(when (and ,@checks) ,@body)))))
+
 (defvar-unbound *need-args*
-  "Ask `do-match-internal' to generate an %arg variable binding that reify the
+  "Ask `%do-match*' to generate an %arg variable binding that reify the
 argument list.")
 
-(defmacro do-match-internal (offset category subject-list &body pat-mat &environment env)
-  "Assume patterns are linear, do simultaneous match against SUBJECT-LIST.
-
-CATEGORY can be one of T, CONSTANT, COMPOUND."
+(defmacro %do-match* (offset category subject-list &body pat-mat &environment env)
+  "Assume patterns are linear, do simultaneous match against SUBJECT-LIST."
 
   (cond ((null pat-mat)
-         (return-from do-match-internal nil))
+         (return-from %do-match* nil))
         ((null subject-list)
-         (return-from do-match-internal
+         (return-from %do-match*
            `(progn ,@(mapcar #'serapeum:only-elt pat-mat))))
         ((not (or (eq category t) (= (length subject-list) 1)))
          (error "CATEGORY only make sense for single subject.")))
@@ -29,11 +97,7 @@ CATEGORY can be one of T, CONSTANT, COMPOUND."
              `((%args (append ,@(mapcar (lambda (a)
                                           (if (seq-var-p a) a `(list (term ,a))))
                                         (cdadr subject))))))
-       ,@(when bind-rows
-           `((do-match-internal ,offset t ,rest
-               ,@(mapcar (lambda (pat-row)
-                           (subst-row subject (car pat-row) (cdr pat-row)))
-                         bind-rows))))
+       ,@(expand-bind-rows offset subject rest bind-rows)
        ,@(ecase category
            ((t) (cond ((term-form-p subject)
                        `(,@(expand-constant-clauses subject constant-clauses)
@@ -45,11 +109,15 @@ CATEGORY can be one of T, CONSTANT, COMPOUND."
            (constant (expand-constant-clauses subject constant-clauses))
            (compound (expand-compound-clauses subject compound-clauses))))))
 
-(defun subst-row (new old pat-row)
-  `(,@(butlast pat-row)
-    (let/static ((,old ,new))
-      (declare (ignorable ,old))
-      ,(lastcar pat-row))))
+(defun expand-bind-rows (offset subject rest bind-rows)
+  (when bind-rows
+    `((%do-match* ,offset t ,rest
+        ,@(mapcar (lambda (pat-row)
+                    `(,@(butlast (cdr pat-row))
+                      (let/static ((,(car pat-row) ,subject))
+                        (declare (ignorable ,(car pat-row)))
+                        ,(lastcar pat-row))))
+                  bind-rows)))))
 
 (defun arity-check-form (offset subject n-args allow-more
                          &aux (cmp (if allow-more '>= '=)))
@@ -72,7 +140,7 @@ non-nil, at least N-ARGS."
   (or (position-if #'seq-var-p args :from-end t) -1))
 
 (defun arg-form (offset subject i)
-  "A form that computes argument I of SUBJECT."
+  "Return a form that computes argument I of SUBJECT."
   (trivia:ematch subject
     ((type symbol) `(get-variadic-slot ,i ,offset ,subject))
     ((list 'term (list* _ args))
@@ -82,7 +150,7 @@ non-nil, at least N-ARGS."
               `(nth ,i %args))))))
 
 (defun arg-from-end-form (subject from-end)
-  "A form that computes argument FROM-END of SUBJECT counting from the end."
+  "Return a form that computes argument FROM-END of SUBJECT counting from the end."
   (trivia:ematch subject
     ((type symbol) `(variadic-slot-from-end ,from-end ,subject))
     ((list 'term (list* _ args))
@@ -93,7 +161,7 @@ non-nil, at least N-ARGS."
                 `(nth (- (length %args) ,(1+ from-end)) %args)))))))
 
 (defun args-between-form (offset subject i from-end)
-  "A form that computes the list of arguments of SUBJECT from I to FROM-END."
+  "Return a form that computes the list of arguments of SUBJECT from I to FROM-END."
   (trivia:ematch subject
     ((type symbol) `(variadic-slots-between ,i ,from-end ,offset ,subject))
     ((list 'term (list* _ args))
@@ -149,7 +217,7 @@ GROUPS is a two-level hash table: FSYM -> (N-ARGS SEQ-VAR-POS) -> PAT-ROWS."
                                &aux compound-clauses constant-clauses)
   "Convert GROUPS as returned by `group-by-fsym-and-arity' into clauses of the
 form ((FSYM-OR-VAR) BODY...) (as expected by `case/bind'). Remaining patterns in
-grouped rows are matched recursively via `do-match-internal' in BODY."
+grouped rows are matched recursively via `%do-match*' in BODY."
   (map-ordered-table
    (lambda (fsym arity-groups)
      (let (compound-clauses-1 constant-clauses-1)
@@ -172,19 +240,19 @@ grouped rows are matched recursively via `do-match-internal' in BODY."
                                          (-1 (arg-form offset subject i))
                                          (0 (args-between-form offset subject i (- n-args i 1)))
                                          (1 (arg-from-end-form subject (- n-args i 1))))))
-                           (do-match-internal ,offset t ,(append arg-vars rest)
+                           (%do-match* ,offset t ,(append arg-vars rest)
                              ,@(mapcar (lambda (pat-row)
                                          (append (cdar pat-row) (cdr pat-row)))
                                        pat-rows))))
                       compound-clauses-1)))
 
             (when (= n-args 0)
-              (push `(do-match-internal ,offset t ,rest ,@(mapcar #'cdr pat-rows))
+              (push `(%do-match* ,offset t ,rest ,@(mapcar #'cdr pat-rows))
                     constant-clauses-1))
 
             ;; Single SEQ-VAR matches constant and binds to NIL
             (when (and (= n-args 1) (eql seq-var-pos 0))
-              (push `(do-match-internal ,offset t ,(cons nil rest)
+              (push `(%do-match* ,offset t ,(cons nil rest)
                        ,@(mapcar (lambda (pat-row)
                                    (append (cdar pat-row) (cdr pat-row)))
                                  pat-rows))
@@ -212,7 +280,7 @@ grouped rows are matched recursively via `do-match-internal' in BODY."
 
 (defun expand-constant-clauses (subject constant-clauses)
   "Like (CASE/BIND SUBJECT CLAUSES...), but assume SUBJECT is a constant and
-partial evaluate if SUBJECT is static."
+partial evaluate if SUBJECT is partially static."
   (unless constant-clauses
     (return-from expand-constant-clauses nil))
   (trivia:ematch subject
@@ -235,65 +303,3 @@ compound (rose-node) and partial evaluate if SUBJECT is partially static."
            `((when (or ,@args)
                ,@(expand-fsym-clauses fsym compound-clauses)))
            (expand-fsym-clauses fsym compound-clauses))))))
-
-(defun node-equal (x y offset)
-  (labels ((process (x y)
-             (cond
-               ((eq x y) t)
-               ((and (not (rose-node-p x)) (not (rose-node-p y))) (eql x y))
-               ((and (rose-node-p x) (rose-node-p y))
-                (unless (= (length x) (length y))
-                  (return-from process nil))
-                (unless (eql (rose-node-fsym x) (rose-node-fsym y))
-                  (return-from process nil))
-                (loop for i from offset below (length x)
-                      always (process (svref x i) (svref y i)))))))
-    (process x y)))
-
-(declaim (inline seq-equal))
-(defun seq-equal (xs ys offset)
-  (declare (type list xs ys))
-  (and (= (length xs) (length ys))
-       (every (lambda (x y) (node-equal x y offset)) xs ys)))
-
-(defun decompose-consistency-check (pat offset body)
-  "For a `do-match*' clause like (PAT BODY...), rename all non-linear variables
-in PAT to distinct linear ones, and wrap BODY with variable consistency checks.
-Return the renamed pattern and wrapped BODY (a single form)."
-  (let (vars checks)
-    (labels ((process-var (var)
-               (cond ((member var vars)
-                      (lret ((new-var (gensym-1 var)))
-                        (push `(,(if (seq-var-p var) 'seq-equal 'node-equal)
-                                ,var ,new-var ,offset)
-                              checks)))
-                     (t (push var vars)
-                        var)))
-             (process (pat)
-               (cond ((consp pat)
-                      (cons (if (var-p (car pat)) (process-var (car pat)) (car pat))
-                            (mapcar #'process (cdr pat))))
-                     ((var-p pat) (process-var pat))
-                     (t pat))))
-      (values (process pat) `(when (and ,@checks) ,@body)))))
-
-(defmacro do-match* (offset category subject &body clauses &environment env)
-  (setq subject (term-form-from-env subject env))
-
-  (multiple-value-bind (bindings subject-1)
-      (if (term-form-p subject)
-          (let ((renames (mapcar (lambda (var) (cons var (gensym-1 var)))
-                                 (remove-duplicates (remove-if-not #'var-p (flatten subject))))))
-            (values (mapcar (lambda (r) (list (cdr r) (car r))) renames)
-                    (sublis renames subject)))
-          (let ((var (gensym "SUBJECT")))
-            (values `((,var ,subject)) var)))
-
-    `(let ,bindings
-       (declare (ignorable ,@(mapcar #'car bindings)))
-       (do-match-internal ,offset ,category (,subject-1)
-         ,@(mapcar (lambda (clause)
-                     (bind (((pat . body) clause))
-                       (multiple-value-list
-                        (decompose-consistency-check pat offset body))))
-                   clauses)))))
