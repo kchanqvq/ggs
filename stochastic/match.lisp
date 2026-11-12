@@ -74,6 +74,11 @@ Return the renamed pattern and wrapped BODY (a single form)."
   "Ask `%do-match*' to generate an %arg variable binding that reify the
 argument list.")
 
+(defun arity-info (pat)
+  (if (consp pat)
+      (list (1- (length pat)) (seq-var-pos (cdr pat)))
+      '(0 nil)))
+
 (defmacro %do-match* (offset category subject-list &body pat-mat &environment env)
   "Assume patterns are linear, do simultaneous match against SUBJECT-LIST."
 
@@ -89,9 +94,12 @@ argument list.")
          ((subject . rest) subject-list)
          (subject (term-form-from-env subject env))
          *need-args*
-         ((:values groups bind-rows) (group-by-fsym-and-arity pat-mat))
+         ((:values bind-rows constructor-rows) (partition #'var-p pat-mat :key #'car))
+         (fsym-groups (assort constructor-rows :key (compose #'ensure-car #'car)))
+         (fsym-arity-groups (mapcar (rcurry #'assort :key (compose #'arity-info #'car))
+                                    fsym-groups))
          ((:values compound-clauses constant-clauses)
-          (groups-to-fsym-clauses offset subject rest groups)))
+          (groups-to-fsym-clauses offset subject rest fsym-arity-groups)))
 
     `(let ,(when *need-args*
              `((%args (append ,@(mapcar (lambda (a)
@@ -174,8 +182,6 @@ non-nil, at least N-ARGS."
              (t (setq *need-args* t)
                 `(subseq %args ,i (- (length %args) ,from-end))))))))
 
-(lp-hash-table:define-hash-table ordered-table sxhash equal :optimize ())
-
 (defun select-pat-column (subject-list pat-mat)
   "Pattern column selection heuristics."
   (let* ((pat-mat (copy-tree pat-mat))
@@ -187,85 +193,55 @@ non-nil, at least N-ARGS."
          (selected (position (reduce #'max column-n-tested)
                              column-n-tested)))
     (rotatef (car subject-list) (nth selected subject-list))
-    (mapc (lambda (row)
-            (rotatef (car row) (nth selected row)))
-          pat-mat)
+    (dolist (row pat-mat)
+      (rotatef (car row) (nth selected row)))
     (values subject-list pat-mat)))
 
-(defun group-by-fsym-and-arity (pat-mat)
-  "Classify PAT-MAT into GROUPS of destructuring rows and BIND-ROWS.
+(defun groups-to-fsym-clauses (offset subject rest groups)
+  (with-collectors (compound-clauses constant-clauses)
+    (dolist (arity-groups groups)
+      (let ((fsym (ensure-car (caaar arity-groups))))
+        (with-collectors (compound-clauses-1 constant-clauses-1)
+          (dolist (pat-rows arity-groups)
+            (bind (((n-args seq-var-pos) (arity-info (caar pat-rows)))
+                   (arg-vars (make-gensym-list n-args (prin1-to-string fsym))))
 
-GROUPS is a two-level hash table: FSYM -> (N-ARGS SEQ-VAR-POS) -> PAT-ROWS."
-  (let ((groups (make-ordered-table))
-        bind-rows)
-    (macrolet ((push-to-group (row fsym arity-info)
-                 `(let ((table (or (ordered-table-get ,fsym groups)
-                                   (ordered-table-put ,fsym  (make-ordered-table) groups))))
-                    (ordered-table-put ,arity-info
-                                       (cons ,row (ordered-table-get ,arity-info table))
-                                       table))))
-      (dolist (pat-row pat-mat)
-        (let ((pat (car pat-row)))
-          (cond ((consp pat)
-                 (push-to-group pat-row (car pat)
-                                (list (1- (length pat)) (seq-var-pos (cdr pat)))))
-                ((var-p pat) (push pat-row bind-rows))
-                (t (push-to-group (cons (list (car pat-row)) (cdr pat-row)) pat '(0 nil)))))))
-    (values groups bind-rows)))
+              (when (> n-args 0)
+                (when-let (check (if seq-var-pos
+                                     (arity-check-form offset subject (1- n-args) t)
+                                     (arity-check-form offset subject n-args nil)))
+                  (compound-clauses-1
+                   `(when ,check
+                      (let/static
+                          ,(loop for var in arg-vars
+                                 for i from 0
+                                 collect
+                                 `(,var
+                                   ,(case (if seq-var-pos (signum (- i seq-var-pos)) -1)
+                                      (-1 (arg-form offset subject i))
+                                      (0 (args-between-form offset subject i (- n-args i 1)))
+                                      (1 (arg-from-end-form subject (- n-args i 1))))))
+                        (%do-match* ,offset t ,(append arg-vars rest)
+                          ,@(mapcar (lambda (pat-row)
+                                      (append (cdar pat-row) (cdr pat-row)))
+                                    pat-rows)))))))
 
-(defun groups-to-fsym-clauses (offset subject rest groups
-                               &aux compound-clauses constant-clauses)
-  "Convert GROUPS as returned by `group-by-fsym-and-arity' into clauses of the
-form ((FSYM-OR-VAR) BODY...) (as expected by `case/bind'). Remaining patterns in
-grouped rows are matched recursively via `%do-match*' in BODY."
-  (map-ordered-table
-   (lambda (fsym arity-groups)
-     (let (compound-clauses-1 constant-clauses-1)
-       (map-ordered-table
-        (lambda (arity-info pat-rows)
-          (bind (((n-args seq-var-pos) arity-info)
-                 (arg-vars (make-gensym-list n-args (prin1-to-string fsym))))
+              (when (= n-args 0)
+                (constant-clauses-1
+                 `(%do-match* ,offset t ,rest ,@(mapcar #'cdr pat-rows))))
 
-            (when (> n-args 0)
-              (when-let (check (if seq-var-pos
-                                   (arity-check-form offset subject (1- n-args) t)
-                                   (arity-check-form offset subject n-args nil)))
-                (push `(when ,check
-                         (let/static
-                             ,(loop for var in arg-vars
-                                    for i from 0
-                                    collect
-                                    `(,var
-                                      ,(case (if seq-var-pos (signum (- i seq-var-pos)) -1)
-                                         (-1 (arg-form offset subject i))
-                                         (0 (args-between-form offset subject i (- n-args i 1)))
-                                         (1 (arg-from-end-form subject (- n-args i 1))))))
-                           (%do-match* ,offset t ,(append arg-vars rest)
-                             ,@(mapcar (lambda (pat-row)
-                                         (append (cdar pat-row) (cdr pat-row)))
-                                       pat-rows))))
-                      compound-clauses-1)))
+              ;; Single SEQ-VAR matches constant and binds to NIL
+              (when (and (= n-args 1) (eql seq-var-pos 0))
+                (constant-clauses-1
+                 `(%do-match* ,offset t ,(cons nil rest)
+                    ,@(mapcar (lambda (pat-row)
+                                (append (cdar pat-row) (cdr pat-row)))
+                              pat-rows))))))
 
-            (when (= n-args 0)
-              (push `(%do-match* ,offset t ,rest ,@(mapcar #'cdr pat-rows))
-                    constant-clauses-1))
-
-            ;; Single SEQ-VAR matches constant and binds to NIL
-            (when (and (= n-args 1) (eql seq-var-pos 0))
-              (push `(%do-match* ,offset t ,(cons nil rest)
-                       ,@(mapcar (lambda (pat-row)
-                                   (append (cdar pat-row) (cdr pat-row)))
-                                 pat-rows))
-                    constant-clauses-1))))
-        arity-groups)
-
-       (when compound-clauses-1
-         (push `((,fsym) ,@(nreverse compound-clauses-1)) compound-clauses))
-       (when constant-clauses-1
-         (push `((,fsym) ,@(nreverse constant-clauses-1)) constant-clauses))))
-   groups)
-
-  (values compound-clauses constant-clauses))
+          (when (compound-clauses-1)
+            (compound-clauses `((,fsym) ,@(compound-clauses-1))))
+          (when (constant-clauses-1)
+            (constant-clauses `((,fsym) ,@(constant-clauses-1)))))))))
 
 (defun expand-fsym-clauses (fsym clauses)
   "Like (CASE/BIND FSYM CLAUSES...), but partial evaluate if FSYM is static."

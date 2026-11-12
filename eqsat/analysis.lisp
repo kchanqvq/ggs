@@ -1,7 +1,5 @@
 (in-package :ggs/eqsat)
 
-(lp-hash-table:define-hash-table ordered-table sxhash eql :optimize ())
-
 (defun compute-analysis-clause (fsym clauses merge)
   `((,fsym)
     ,@(when (var-p fsym) `((declare (ignorable ,fsym))))
@@ -27,14 +25,8 @@
        clauses)))
 
 (defun compute-make-lambda (merge bottom type clauses)
-  (let ((clauses-by-fsym (make-ordered-table))
-        (var-clauses '()))
-    (dolist (clause clauses)
-      (if (var-p (car clause))
-          (push clause var-clauses)
-          (ordered-table-put (ensure-car (car clause))
-                             (cons clause (ordered-table-get (caar clause) clauses-by-fsym))
-                             clauses-by-fsym)))
+  (bind (((:values var-clauses fsym-clauses) (partition #'var-p clauses :key #'car))
+         (clauses-by-fsym (assort fsym-clauses :key (compose #'ensure-car #'car))))
     `(lambda (top-enode)
        (macrolet ((get-analysis-data (name enode)
                     `(the ,(getf (get-analysis name) :type)
@@ -47,11 +39,10 @@
                           (setf result (funcall ,merge result (locally ,@(cdr clause))))))
                      (nreverse var-clauses))
            (case/bind (enode-fsym top-enode)
-             ,@(collecting
-                 (map-ordered-table
-                  (lambda (fsym clauses)
-                    (collect (compute-analysis-clause fsym clauses merge)))
-                  clauses-by-fsym)))
+             ,@(mapcar
+                (lambda (clauses)
+                  (compute-analysis-clause (ensure-car (caar clauses)) clauses merge))
+                clauses-by-fsym))
            result)))))
 
 (defparameter *compiled-makes* (make-hash-table :test 'equal))

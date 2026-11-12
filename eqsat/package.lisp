@@ -1,6 +1,7 @@
 (uiop:define-package :ggs/eqsat
     (:use #:cl #:alexandria #:ggs/util #:ggs/common)
-  (:import-from #:serapeum #:lret #:lret* #:-> #:collecting #:defvar-unbound)
+  (:import-from #:serapeum #:lret #:lret* #:-> #:collecting #:defvar-unbound
+                #:partition #:assort)
   (:import-from #:bind #:bind)
   (:reexport #:ggs/common)
   (:export #:make-enode #:enode-fsym #:enode-arg #:enode-n-args
