@@ -1,0 +1,94 @@
+#+TITLE: Math workload validation of cost-invariant weights
+
+* Conclusion
+This PR does not optimize the math workload's original cost analysis. Of the
+40 rules in =math-all=, zero are specialized, and the generated Lisp text is
+identical with the proof enabled and disabled. The earlier 19–22% runtime
+reductions on size-analysis microbenchmarks do not establish a math speedup.
+
+The original =ast-size-no-d-or-i= analysis assigns cost 100 to =d= and =i= and
+cost 1 to other operators, then sums child costs. Its constructor-dependent
+=IF/MEMBER= expression is outside the current proof language. Recognition fails
+for the entire analysis, so even the commutation/reassociation rules fall back.
+This is a limitation of the implementation, not a proof that no math rules can
+have invariant cost. Extending recognition to operator-specific costs would
+require further implementation and validation, and would still cover only the
+rules whose delta can be proven zero.
+
+* What was evaluated
+The repository's existing =eqsat/tests/math.lisp= harness runs equality saturation;
+this PR only changes stochastic compilation. [[file:math-weights.lisp][The additional harness]] ports its
+rules and eight input terms to stochastic search. It reads the common rule and
+analysis definitions directly from that source and retains the original weighted
+cost; it does not replace it with plain AST size or remove size-changing rules.
+
+The only guard adapter replaces the e-class =non-zero-p= lookup with a tree-level
+check: reject literal integer zero and permit unknown symbolic/compound terms.
+An AST has no equivalence-class alternatives. Consequently these are explicitly
+stochastic-port measurements, not executions of the native eqsat benchmark or a
+claim of identical eqsat search semantics. The native eqsat implementation is
+unaffected by this PR.
+
+Configuration: one worker, beta 2.0, one restart, target cost 0, 20 initial
+hard-walk steps and 20 soft-walk steps after 1,000 stalls. The primary run has a
+1,000,000-stall budget and seeds 0–5; a holdout has a 2,000,000-stall budget and
+seeds 10–15. Because improvements reset the stall counter, accepted rewrite
+counts can exceed those budgets; the raw files report the actual counts.
+
+Both modes are compiled and warmed before timing. Full host GC precedes every
+sample outside its timed interval. Order alternates OFF/ON for paired seeds;
+the holdout also reverses compilation order. Runs are serialized and pinned to
+CPU 24 on the same SBCL 2.6.2 / Threadripper PRO 7985WX machine as the earlier
+benchmarks. CPU time and wall time are recorded.
+
+Validation asserts zero specialized rules and equal complete generated Lisp text
+(the readable comparison handles SBCL's quasiquote comma objects). Every timed
+pair must agree on final term, cost, accepted moves and restarts. Separate short
+runs compare full histories for all eight inputs and three seeds. Some integration
+inputs remain unsolved at these budgets; this measures search execution, not a
+claim that all math problems are solved. Compilation itself is not timed.
+
+* Results
+These ratios are approximately 1.0; the implementation provides no optimized
+runtime path for this cost. Small differences between separately compiled copies
+must not be attributed to cost-invariance elimination. Times are wall-time
+medians of six seeds, and speedup is OFF/ON.
+
+** Primary run
+| Input | OFF seconds | ON seconds | OFF/ON |
+|-------+-------------+------------+--------|
+| simplify-root | 0.1030 | 0.1020 | 1.010x |
+| simplify-factor | 0.1235 | 0.1230 | 1.004x |
+| diff-power-simple | 0.1100 | 0.1090 | 1.009x |
+| diff-power-harder | 0.1310 | 0.1295 | 1.012x |
+| integral-part-1 | 0.5590 | 0.5475 | 1.021x |
+| integral-part-2 | 0.5220 | 0.5195 | 1.005x |
+| integral-part-3 | 0.1515 | 0.1515 | 1.000x |
+| extract-power | 0.1150 | 0.1135 | 1.013x |
+Geometric mean of per-input median ratios: 1.009x.
+Raw samples: [[file:math-paired-results.csv]].
+
+** Holdout, reversed compilation order
+| Input | OFF seconds | ON seconds | OFF/ON |
+|-------+-------------+------------+--------|
+| simplify-root | 0.1840 | 0.1855 | 0.992x |
+| simplify-factor | 0.2300 | 0.2290 | 1.004x |
+| diff-power-simple | 0.2000 | 0.2010 | 0.995x |
+| diff-power-harder | 0.2380 | 0.2380 | 1.000x |
+| integral-part-1 | 0.8280 | 0.8275 | 1.001x |
+| integral-part-2 | 1.3845 | 1.3880 | 0.997x |
+| integral-part-3 | 0.2495 | 0.2515 | 0.992x |
+| extract-power | 0.2105 | 0.2140 | 0.984x |
+Geometric mean of per-input median ratios: 0.996x.
+Raw samples: [[file:math-holdout-results.csv]].
+
+* Reproduction
+With the repository and existing dependencies available through ASDF/Quicklisp:
+#+begin_src sh
+MATH_STALL=1000000 MATH_ROUNDS=6 taskset -c 24 \
+  sbcl --non-interactive --load stochastic/benchmarks/math-weights.lisp
+MATH_STALL=2000000 MATH_ROUNDS=6 MATH_SEED_START=10 MATH_REVERSE_COMPILE=1 taskset -c 24 \
+  sbcl --non-interactive --load stochastic/benchmarks/math-weights.lisp
+#+end_src
+Choose an available CPU on other machines. The coverage assertion deliberately
+checks the present PR; it must be revisited if a future proof supports this analysis.

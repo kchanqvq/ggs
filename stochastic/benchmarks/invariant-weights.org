@@ -1,5 +1,11 @@
 #+TITLE: Cost-invariant stochastic rewrite weights
 
+* Math coverage limitation
+The additional [[file:math-weights.org][math workload evaluation]] uses the repository's original
+operator-weighted cost. This PR specializes 0 of 40 rules for that analysis and
+has no demonstrated speedup there. The size-analysis results below are narrower
+than a general stochastic-search performance claim.
+
 * Change
 For a supported pure additive integer analysis, compilation can prove that a
 rewrite preserves proxy cost. Such a rule now uses =fastexp2(0)= directly instead
