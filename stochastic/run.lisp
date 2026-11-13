@@ -52,7 +52,8 @@
                (t `',tmpl))))
    (process tmpl)))
 
-(defun compute-rule-set-lambda (rules cost proxy-cost analyses-alist user-decls)
+(defun compute-rule-set-lambda (rules cost proxy-cost analyses-alist user-decls
+                                &key (optimize-invariant-weights t))
   (let ((type (getf (assoc-value analyses-alist proxy-cost) :type)))
     (unless (subtypep type 'cost)
       (warn 'simple-style-warning
@@ -63,7 +64,13 @@
          (macrolets `((get-analysis-data (name term &environment env)
                         (expand-analysis-access ,offset name ',analyses-alist term env))
                       (term (tmpl)
-                            (expand-template tmpl ,offset))))
+                            (expand-template tmpl ,offset))
+                      (rewrite-weight (rhs)
+                        `(fastexp2 (- cost (get-analysis-data ,',proxy-cost (term ,rhs)))
+                                   beta-constant))))
+         (model (and optimize-invariant-weights
+                     (additive-cost-model proxy-cost (assoc-value analyses-alist proxy-cost))))
+         (rules (mapcar (lambda (rule) (specialize-invariant-rule-weight rule model)) rules))
          (rules (mapcar (lambda (rule)
                           `(,(car rule) (locally (declare ,@user-decls) ,@(cdr rule))))
                         rules)))
@@ -85,9 +92,7 @@
                                 `(locally (declare (optimize speed (safety 0)))
                                    (incf (rose-node-n-rewrites subject))
                                    (incf (rose-node-weight subject)
-                                         (fastexp2
-                                          (- cost (get-analysis-data ,',proxy-cost (term ,rhs)))
-                                          beta-constant)))))
+                                         (rewrite-weight ,rhs)))))
 
                      ;; rewrites inside the arguments
                      (setf (rose-node-n-rewrites subject) 0)
@@ -156,9 +161,7 @@
                    (yield-rewrite (rhs)
                      `(locally (declare (optimize speed (safety 0)))
                         (decf weight
-                              (fastexp2
-                               (- cost (get-analysis-data ,',proxy-cost (term ,rhs)))
-                               beta-constant))
+                              (rewrite-weight ,rhs))
                         (when (minusp weight)
                           (setq *last-fired-ruleset* %current-ruleset%)
                           (return-from sample (context (term ,rhs)))))))

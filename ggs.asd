@@ -48,6 +48,7 @@
                (:file "node")
                (:file "match")
                (:file "analysis")
+               (:file "cost-model")
                (:file "run"))
   :in-order-to ((test-op (test-op "ggs/stochastic/tests"))))
 
@@ -58,7 +59,7 @@
                :fiveam)
   :components ((:file "search")
                (:file "analysis")
-               (:file "redefinition"))
+               (:file "cost-model"))
   :perform (test-op (o c) (symbol-call :fiveam '#:run! :ggs/stochastic)))
 
 (asdf:defsystem #:ggs/eqsat/tests

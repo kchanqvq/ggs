@@ -1,0 +1,94 @@
+#+TITLE: Cost-invariant stochastic rewrite weights
+
+* Change
+For a supported pure additive integer analysis, compilation can prove that a
+rewrite preserves proxy cost. Such a rule now uses =fastexp2(0)= directly instead
+of repeatedly evaluating RHS cost, subtracting, and computing the exponential in
+both finalization and finite-temperature sampling. The approximate exponential
+at zero is preserved exactly; it is not replaced with =1.0=.
+
+For example, reassociation under node-count cost gives the same expression on
+both sides: =min(B, 2 + cost(a) + cost(b) + cost(c))=. This repeats across the
+ancestors rebuilt after each rewrite, so eliminating it reduces substantial work.
+
+[[file:../cost-model.lisp][The proof]] recognizes constructor-independent clauses with distinct variables,
+nonnegative integer constants and sums of child analysis values, merged with MIN
+against a nonnegative integer bound. Repeated child contributions are supported.
+Nested clamps can be flattened because all terms are nonnegative and nonzero
+coefficients are positive integers. Variable multiplicities and constant terms
+must agree. Missing arities, saturation and zero-argument variable-head templates
+are handled explicitly. No user code is evaluated by the proof.
+
+Only unconditional single rewrites are specialized. Arbitrary guards, =:eval=
+bodies, floating analyses, sequence splices, and unsupported analyses retain the
+original calculation. Recognition is based on definitions, not benchmark or
+analysis names. Matching, rewrite order, allocation, random sampling and floating
+accumulation order are unchanged. The internal compiler keyword
+=:optimize-invariant-weights nil= exists for differential tests and ablation;
+normal compilation enables the proof without a runtime branch.
+
+* Validation
+The isolated change passes all 5,997 stochastic checks. New tests compare full
+accepted-move histories with the proof off/on for multiple seeds, hard-walk and
+finite-temperature steps, separate proxy cost, mutable guards/bodies, and fallback
+analyses. Another 300 cases compare every node's weight bits, rewrite counts and
+analysis metadata, including saturated costs, repeated child contributions and
+several beta constants. The new test component replaces the stale reference to
+=stochastic/tests/redefinition.lisp=, which is absent in the base revision.
+
+* Benchmark protocol
+Measured on the original vector backend, from base revision
+=055c5834ca9a5f46435bc151d8650be07c391f4b= with only this compiler change, its tests,
+and benchmark files. SBCL 2.6.2, AMD Ryzen Threadripper PRO 7985WX, logical CPU 24.
+All performance runs are serialized.
+
+The [[file:invariant-weights.lisp][harness]] alternates proof OFF/ON within a process for six paired seeds.
+Compilation and warm-up happen before measurement, and full host GC is outside
+each interval. Each sample checks that its precompiled cache is used; every pair
+must agree on final cost, term, accepted moves and restarts. Timing includes host
+GC during the search. Tables show wall-time medians; speedup is OFF/ON.
+
+The main run uses one million rewrites and seeds 0–5. The holdout doubles the
+length to two million rewrites with new seeds 10–15. =powers-64= uses the
+unsupported =weighted= analysis as a negative control. Four cases exercise the
+same reassociation rules at different sizes/leaf types; the results are not a
+claim about arbitrary rule sets or user Lisp analyses.
+
+* Results
+** One million rewrites
+| Workload | OFF seconds | ON seconds | Speedup | Time reduction |
+|----------+-------------+------------+---------+----------------|
+| reassoc-32 | 0.2460 | 0.1945 | 1.265x | 20.9% |
+| reassoc-256 | 0.6540 | 0.5310 | 1.232x | 18.8% |
+| powers-64 | 0.1630 | 0.1645 | 0.991x | -0.9% |
+| symbols-256 | 0.7100 | 0.5545 | 1.280x | 21.9% |
+| ternary-81 | 0.1150 | 0.1060 | 1.085x | 7.8% |
+| constructors-64 | 0.3620 | 0.2945 | 1.229x | 18.6% |
+Raw samples: [[file:invariant-paired-results.csv]].
+
+** Holdout: two million rewrites
+| Workload | OFF seconds | ON seconds | Speedup | Time reduction |
+|----------+-------------+------------+---------+----------------|
+| reassoc-32 | 0.4875 | 0.3800 | 1.283x | 22.1% |
+| reassoc-256 | 1.3600 | 1.0900 | 1.248x | 19.9% |
+| powers-64 | 0.3165 | 0.3155 | 1.003x | 0.3% |
+| symbols-256 | 1.4670 | 1.1420 | 1.285x | 22.2% |
+| ternary-81 | 0.2145 | 0.1970 | 1.089x | 8.2% |
+| constructors-64 | 0.7120 | 0.5710 | 1.247x | 19.8% |
+Raw samples: [[file:invariant-holdout-results.csv]].
+
+* Reproduction
+Make the repository and its existing dependencies, including =lp-hash-table=,
+available through ASDF/Quicklisp. Run from the repository root:
+#+begin_src sh
+sbcl --non-interactive --eval '(require :asdf)' \
+  --eval '(asdf:load-asd (truename "ggs.asd"))' \
+  --eval '(ql:quickload :ggs/stochastic/tests :silent t)' \
+  --eval '(unless (fiveam:run! :ggs/stochastic) (uiop:quit 1))'
+
+WEIGHT_STEPS=1000000 WEIGHT_ROUNDS=6 taskset -c 24 \
+  sbcl --non-interactive --load stochastic/benchmarks/invariant-weights.lisp
+WEIGHT_STEPS=2000000 WEIGHT_ROUNDS=6 WEIGHT_SEED_START=10 taskset -c 24 \
+  sbcl --non-interactive --load stochastic/benchmarks/invariant-weights.lisp
+#+end_src
+Choose an available logical CPU on other machines. Raw samples are included below.
