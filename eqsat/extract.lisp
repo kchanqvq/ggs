@@ -1,18 +1,11 @@
 (in-package :ggs/eqsat)
 
 (defun build-term (enode selections)
-  (bind ((memo (make-hash-table))       ; used to preserve sharing
-         ((:labels process (class))
-          (case (gethash class memo)
-            (visiting (error "Cycle"))
-            ((nil)
-             (setf (gethash class memo) 'visiting
-                   (gethash class memo)
-                   (let ((enode (gethash class selections)))
-                     (if (plusp (enode-n-args enode))
-                         (cons (enode-fsym enode) (map-enode-args #'process enode))
-                         (enode-fsym enode)))))
-            (t (gethash class memo)))))
+  (memo-labels ((process (class)
+                  (let ((enode (gethash class selections)))
+                    (if (plusp (enode-n-args enode))
+                        (cons (enode-fsym enode) (map-enode-args #'process enode))
+                        (enode-fsym enode)))))
     (process (enode-find enode))))
 
 ;; FIXME: The extraction functions can take analysis not in `*egraph*', as long

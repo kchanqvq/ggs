@@ -12,21 +12,23 @@
   `(function (rose-node fixnum) rose-node))
 
 (defun term-node (term offset finalize-node beta-constant)
-  (labels ((process (term)
-             (cond ((atom term) term)
-                   ((null (cdr term)) (car term))
-                   (t (funcall finalize-node
-                               (make-rose-node :offset offset
-                                               :fsym (car term)
-                                               :args (mapcar #'process (cdr term)))
-                               beta-constant)))))
+  (memo-labels ((process (term)
+                  (cond ((atom term) term)
+                        ((null (cdr term)) (car term))
+                        (t (funcall finalize-node
+                                    (make-rose-node :offset offset
+                                                    :fsym (car term)
+                                                    :args (mapcar #'process (cdr term)))
+                                    beta-constant)))))
     (process term)))
 
 (defun node-term (term offset)
-  (if (rose-node-p term)
-      (cons (rose-node-fsym term)
-            (map-variadic-slots (lambda (a) (node-term a offset)) offset term))
-      term))
+  (memo-labels ((process (term)
+                  (if (rose-node-p term)
+                      (cons (rose-node-fsym term)
+                            (map-variadic-slots #'process offset term))
+                      term)))
+    (process term)))
 
 (declaim (inline node-replace-arg))
 (defun node-replace-arg (node i new-arg offset)

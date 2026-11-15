@@ -12,7 +12,7 @@
            #:get-rules #:get-analysis #:get-user-decls #:get-analysis-data
            #:alist-like-get #:with-careful
            #:term #:term-form-p #:normalize-term-form #:term-form-from-env
-           #:let/static))
+           #:let/static #:memo-labels))
 
 (in-package :ggs/util)
 
@@ -263,3 +263,16 @@ Useful for constant folding and macroexpansion-time partial evaluation."
           (static `(symbol-macrolet ,static ,@body))
           (t `(let ,dynamic ,@body)))))
 
+(defmacro memo-labels (((fn-name (arg) &body fn-body)) &body body)
+  "Bind one single-argument LABELS function, that memoize using the only argument.
+Useful for mapping over some object graph while preserving sharing. Detect and
+errors on cycle."
+  `(let ((%memo (make-hash-table)))
+     (labels ((,fn-name (,arg)
+                (case (gethash ,arg %memo)
+                  (visiting (error "Cycle"))
+                  ((nil)
+                   (setf (gethash ,arg %memo) 'visiting
+                         (gethash ,arg %memo) (locally ,@fn-body)))
+                  (t (gethash ,arg %memo)))))
+       ,@body)))

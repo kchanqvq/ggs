@@ -508,20 +508,14 @@ Only contains canonical enodes after `egraph-rebuild'."
 
 Currently no effort is spent optimizing this, use it only for convenience.
 Use `yield-rewrite' and `make-enode' for serious business."
-  (bind ((memo (make-hash-table))       ; used to preserve sharing
-         ((:flet check-var (maybe-var))
-          (when (var-p maybe-var)
-            (error "Variable ~a in ~a" maybe-var term))
-          maybe-var)
-         ((:labels process (term))
-          (case (gethash term memo)
-            (visiting (error "Cycle"))
-            ((nil)
-             (setf (gethash term memo) 'visiting
-                   (gethash term memo)
-                   (cond ((consp term)
-                          (apply #'make-enode (check-var (car term)) (mapcar #'process (cdr term))))
-                         ((enode-p term) term)
-                         (t (make-enode (check-var term))))))
-            (t (gethash term memo)))))
-    (process term)))
+  (flet ((check-var (maybe-var)
+           (when (var-p maybe-var)
+             (error "Variable ~a in ~a" maybe-var term))))
+    (memo-labels ((process (term)
+                    (cond ((consp term)
+                           (check-var (car term))
+                           (apply #'make-enode (car term) (mapcar #'process (cdr term))))
+                          ((enode-p term) term)
+                          (t (check-var term)
+                             (make-enode term)))))
+      (process term))))
