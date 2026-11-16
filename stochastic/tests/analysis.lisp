@@ -75,7 +75,7 @@ right-hand side."
            ,@(loop for (lhs rhs) in rules
                    for i from 0
                    collect `((probe ,i ,@(probe-vars lhs))
-                             :eval (push (cons ,i (,analysis (ggs/util:term ,rhs))) *probed*)))))
+                             :eval (push (cons ,i (,analysis (ggs/stochastic::term ,rhs))) *probed*)))))
   name)
 
 (defun static-analysis (rule-set analysis i lhs bindings)
@@ -112,6 +112,10 @@ the variables of LHS, as a rule's weight computes it."
 
 (def-test template-costs-weighted ()
   (check-templates 'templates *templates* 'weighted))
+
+(def-test template-costs-ends-heavy ()
+  ;; Clauses whose arity can't match a template must be dropped, not expanded
+  (check-templates 'templates *templates* 'ends-heavy))
 
 ;; Sequence variables in templates, and arguments matched by the sequence
 ;; variables of FANOUT, LAST-HEAVY and ENDS-HEAVY.  Those need every argument at run time,

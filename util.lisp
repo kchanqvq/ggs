@@ -1,7 +1,7 @@
 (uiop:define-package :ggs/util
     (:use #:cl #:alexandria #:ggs/common)
   (:import-from #:serapeum #:with-collector #:string-prefix-p #:eval-always #:->
-                #:partition #:lret)
+                #:partition #:lret #:partition-declarations)
   (:import-from #:metabang-bind #:bind)
   (:import-from #:ggs/common #:get-analysis-data)
   (:export #:define-variadic-structure
@@ -11,7 +11,6 @@
            #:var-p #:seq-var-p #:seq-var-pos #:gensym-1 #:case/bind
            #:get-rules #:get-analysis #:get-user-decls #:get-analysis-data
            #:alist-like-get #:with-careful
-           #:term #:term-form-p #:normalize-term-form #:term-form-from-env
            #:let/static #:memo-labels))
 
 (in-package :ggs/util)
@@ -233,35 +232,22 @@ hierarchy)."
 (defmacro with-careful (&body body)
   `(locally (declare (optimize (safety 1))) ,@body))
 
-(defun term-form-p (form)
-  (and (consp form) (eq (car form) 'term)
-       (or (= (length form) 2) (error "Illegal term form: ~S" form))))
-
-(defun normalize-term-form (form)
-  (cond ((not (term-form-p form)) form)
-        ((var-p (cadr form)) (cadr form))
-        ((not (consp (cadr form))) `(term (,(cadr form))))
-        (t form)))
-
-(defun term-form-from-env (form env)
-  (labels ((try (form)
-             (if (term-form-p form)
-                 (normalize-term-form form)
-                 (multiple-value-bind (form-1 expanded) (macroexpand-1 form env)
-                   (if expanded (try form-1) form)))))
-    (try form)))
-
-(defmacro let/static (bindings &body body &environment env)
-  "Like LET, but use SYMBOL-MACROLET for constant or term-form bindings.
-Useful for constant folding and macroexpansion-time partial evaluation."
+(defmacro let/static (constantp bindings &body body &environment env)
+  "Like LET, but use SYMBOL-MACROLET for value forms that satisfy CONSTANTP.
+CONSTANTP should be a function designator available at expansion time that takes
+a form and an environment and return a boolean.  Useful for constant folding and
+macroexpansion-time partial evaluation."
   (bind (((:values static dynamic)
-          (partition (lambda (v) (or (term-form-p v) (constantp v env)))
-                     bindings :key #'cadr))
-         (static (mapcar (lambda (b) (list (car b) (cadr b))) static)))
+          (partition (lambda (v) (funcall constantp v env)) bindings :key #'cadr))
+         (static (mapcar (lambda (b) (list (car b) (cadr b))) static))
+         ((:values body decls) (parse-body body))
+         ((:values static-decls dynamic-decls)
+          (partition-declarations (mapcar #'car static) decls env)))
     (cond ((and static dynamic)
-           `(symbol-macrolet ,static (let ,dynamic ,@body)))
-          (static `(symbol-macrolet ,static ,@body))
-          (t `(let ,dynamic ,@body)))))
+           `(symbol-macrolet ,static ,@static-decls
+              (let ,dynamic ,@dynamic-decls ,@body)))
+          (static `(symbol-macrolet ,static ,@decls ,@body))
+          (t `(let ,dynamic ,@decls ,@body)))))
 
 (defmacro memo-labels (((fn-name (arg) &body fn-body)) &body body)
   "Bind one single-argument LABELS function, that memoize using the only argument.

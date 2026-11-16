@@ -277,7 +277,7 @@ variable. ARG-ITEMS should be like what `list-form-items' return."
        ,@body)))
 
 (defmacro %make-enode-from-args (fsym args-form)
-  `(let/static ((%fsym ,fsym))
+  `(let/static constantp ((%fsym ,fsym))
      (declare (optimize speed (safety 0)))
      (with-key-node key-node (%fsym ,@(list-form-items args-form))
        (%intern-enode key-node))))
@@ -305,7 +305,7 @@ variable. ARG-ITEMS should be like what `list-form-items' return."
 
 (defmacro %merge-make-enode-from-args (existing fsym args-form)
   (once-only (existing)
-    `(let/static ((%fsym ,fsym))
+    `(let/static constantp ((%fsym ,fsym))
        (declare (optimize speed (safety 0)))
        (check-type ,existing enode)
        (with-key-node key-node (%fsym ,@(list-form-items args-form))
