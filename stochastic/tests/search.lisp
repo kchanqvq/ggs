@@ -106,12 +106,12 @@
 ;;; Search results
 
 (def-test readme-example ()
-  (multiple-value-bind (cost term) (search* '(+ (+ (- x) (+ y (- x))) (+ (- y) x)) 'cancel 'size)
+  (multiple-value-bind (term cost) (search* '(+ (+ (- x) (+ y (- x))) (+ (- y) x)) 'cancel 'size)
     (is (= 2 cost))
     (is (equal '(- x) term))))
 
 (def-test constant-term ()
-  (multiple-value-bind (cost term plist) (search* 'x 'cancel 'size)
+  (multiple-value-bind (term cost plist) (search* 'x 'cancel 'size)
     (is (= 1 cost))
     (is (eq 'x term))
     (is (= 0 (getf plist :n-accepted)))))
@@ -127,7 +127,7 @@
                                           ((+ (+ (+ (+ a b) c) d) e) reassoc size)
                                           ((* (* x x) (* y y)) powers weighted)
                                           ((* (pow x 2) y) powers weighted))
-        do (multiple-value-bind (cost best) (search* term rule-set analysis)
+        do (multiple-value-bind (best cost) (search* term rule-set analysis)
              (is (= (reference-cost analysis best) cost)
                  "~a of ~s is ~a, but the search reported ~a"
                  analysis best (reference-cost analysis best) cost)
@@ -136,7 +136,7 @@
 (def-test full-history-costs ()
   ;; Every accepted move's cost is the cost of the term it produced: node
   ;; analyses stay right through path copies and RECOMPUTE-ROSE.
-  (multiple-value-bind (cost term plist)
+  (multiple-value-bind (term cost plist)
       (search* '(* (* x x) (+ (* y y) z)) 'powers 'weighted :save-full-history t)
     (declare (ignore cost term))
     (let ((entries (loop for run in (getf plist :full-history)
@@ -148,7 +148,7 @@
             (getf entry :term) (reference-cost 'weighted (getf entry :term)) (getf entry :cost))))))
 
 (def-test cost-history ()
-  (multiple-value-bind (cost term plist)
+  (multiple-value-bind (term cost plist)
       (search* '(+ (+ (+ (+ a b) c) d) e) 'reassoc 'depth :save-cost-history t)
     (declare (ignore term))
     (let ((costs (mapcar #'second (getf plist :cost-history))))
@@ -157,13 +157,13 @@
       (is (= cost (lastcar costs))))))
 
 (def-test target-cost ()
-  (multiple-value-bind (cost) (search* '(+ (+ (+ (+ a b) c) d) e) 'reassoc 'depth
-                                       :target-cost 4 :max-restart 64)
+  (let ((cost (nth-value 1 (search* '(+ (+ (+ (+ a b) c) d) e) 'reassoc 'depth
+                                      :target-cost 4 :max-restart 64))))
     (is (<= cost 4))))
 
 (def-test proxy-cost ()
   ;; Minimises DEPTH, sampling rewrites by SIZE: the result is reported in DEPTH.
-  (multiple-value-bind (cost term)
+  (multiple-value-bind (term cost)
       (search* '(+ (+ (+ (+ a b) c) d) e) 'reassoc 'depth :proxy-cost 'size)
     (is (= (tree-depth term) cost))
     (is (< cost 5))))
@@ -173,12 +173,12 @@
     ;; Single-threaded first: an error inside a worker thread escapes the test
     ;; framework and ends the whole run, so let it surface here instead.
     (search* term 'cancel 'size)
-    (multiple-value-bind (cost best) (search* term 'cancel 'size :nproc 2)
+    (multiple-value-bind (best cost) (search* term 'cancel 'size :nproc 2)
       (is (= 2 cost))
       (is (equal '(- x) best)))))
 
 (def-test no-processes ()
-  (multiple-value-bind (cost term) (search* '(+ x 0) 'cancel 'size :nproc 0)
+  (multiple-value-bind (term cost) (search* '(+ x 0) 'cancel 'size :nproc 0)
     (is (= +inf-cost+ cost))
     (is (equal '(+ x 0) term))))
 
@@ -198,24 +198,24 @@
   ((d (?x) (?x)) 0))
 
 (def-test repeated-variables ()
-  (is (eql 0 (nth-value 1 (search* '(- (f x) (f x)) 'repeated 'size))))
-  (is (equal '(- (f x) (f y)) (nth-value 1 (search* '(- (f x) (f y)) 'repeated 'size))))
-  (is (eql 0 (nth-value 1 (search* '(d x x) 'repeated 'size))))
-  (is (equal '(d x y) (nth-value 1 (search* '(d x y) 'repeated 'size)))))
+  (is (eql 0 (search* '(- (f x) (f x)) 'repeated 'size)))
+  (is (equal '(- (f x) (f y)) (search* '(- (f x) (f y)) 'repeated 'size)))
+  (is (eql 0 (search* '(d x x) 'repeated 'size)))
+  (is (equal '(d x y) (search* '(d x y) 'repeated 'size))))
 
 (defrw* first-arg ((f ?x ??rest) ?x))
 
 (def-test sequence-variable-in-pattern ()
-  (is (equal '(g a) (nth-value 1 (search* '(f (g a) b c) 'first-arg 'size)))))
+  (is (equal '(g a) (search* '(f (g a) b c) 'first-arg 'size))))
 
 (defrw* rest-args
   ((f ?x ??rest) (g ??rest)))
 
 (def-test sequence-variable-in-template ()
   (flet ((best (term) (subseq (multiple-value-list (search* term 'rest-args 'size)) 0 2)))
-    (is (equal '(3 (g b c)) (best '(f a b c))))
+    (is (equal '((g b c) 3) (best '(f a b c))))
     ;; An empty sequence makes (G ??REST) the constant G
-    (is (equal '(1 g) (best '(f a))))))
+    (is (equal '(g 1) (best '(f a))))))
 
 (defrw* no-rules)
 
@@ -223,10 +223,10 @@
 
 (def-test empty-clauses ()
   ;; DO-MATCH* with no clauses: an empty rule set, and an analysis without clauses
-  (multiple-value-bind (cost term) (search* '(+ x 0) 'no-rules 'size)
+  (multiple-value-bind (term cost) (search* '(+ x 0) 'no-rules 'size)
     (is (= 3 cost))
     (is (equal '(+ x 0) term)))
-  (is (eq 'x (nth-value 1 (search* '(+ x 0) 'cancel 'size :analyses '(no-clauses))))))
+  (is (eq 'x (search* '(+ x 0) 'cancel 'size :analyses '(no-clauses)))))
 
 (defrw* fold
   ((+ (?a) (?b))
@@ -235,15 +235,15 @@
              (yield-rewrite (?n))))))
 
 (def-test eval-rule ()
-  (is (eql 9 (nth-value 1 (search* '(+ 2 (+ 3 4)) 'fold 'size)))))
+  (is (eql 9 (search* '(+ 2 (+ 3 4)) 'fold 'size))))
 
 (defrw* guarded
   ((+ ?a ?b) (+ ?b ?a))
   ((+ ?a 0) ?a :guard (<= (depth ?a) 1)))
 
 (def-test guard-reads-analysis ()
-  (is (eq 'x (nth-value 1 (search* '(+ x 0) 'guarded 'size :analyses '(depth)))))
-  (is (= 5 (search* '(+ (f (g x)) 0) 'guarded 'size :analyses '(depth))))
+  (is (eq 'x (search* '(+ x 0) 'guarded 'size :analyses '(depth))))
+  (is (= 5 (nth-value 1 (search* '(+ (f (g x)) 0) 'guarded 'size :analyses '(depth)))))
   ;; DEPTH is not among the stored analyses (quiet the compiler's report of it)
   (let ((*error-output* (make-broadcast-stream)))
     (signals error (search* '(+ x 0) 'guarded 'size))))
@@ -273,7 +273,7 @@
                                           ((f a a) a-to-b (f b b))
                                           ((f (f a)) a-to-b (f (f b)))
                                           ((f a) a-to-node (f (g b))))
-        do (multiple-value-bind (cost best) (search* term rule-set 'a-heavy)
+        do (multiple-value-bind (best cost) (search* term rule-set 'a-heavy)
              (is (equal expected best) "~s with ~a gave ~s" term rule-set best)
              (is (= (tree-a-heavy expected) cost)))))
 
@@ -307,7 +307,7 @@
   ((+ ?a 0) ?a))
 
 (def-test escape-infinite-cost ()
-  (multiple-value-bind (cost term) (search* '(+ (foo x) 0) 'remove-foo 'no-foo)
+  (multiple-value-bind (term cost) (search* '(+ (foo x) 0) 'remove-foo 'no-foo)
     (is (= 2 cost))
     (is (equal '(bar x) term))))
 

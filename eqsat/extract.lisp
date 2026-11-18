@@ -25,8 +25,10 @@
     selections))
 
 (defun greedy-extract (enode cost-analysis)
-  "Greedy extract a term for ENODE from `*egraph*' using COST-ANALYSIS."
-  (build-term enode (greedy-select cost-analysis)))
+  "Greedy extract a term for ENODE from `*egraph*' using COST-ANALYSIS.
+Return the extracted term and its cost."
+  (values (build-term enode (greedy-select cost-analysis))
+          (enode-analysis-data cost-analysis enode)))
 
 (defun lp-select (enode weight-analysis)
   (let ((class-vars (make-hash-table))  ; map eclass to lp var or 'visiting
@@ -59,23 +61,26 @@
                    (push `(lp:<= ,var ,(visit-class class)) constraints)))))
       (dolist (enode (ensure-list enode))
         (push `(lp:<= 1 ,(visit-class (enode-find enode))) constraints)))
-    (lret ((solution
+    (let ((solution
             (lp:solve-problem
              (lp:parse-linear-problem
               `(lp:min (lp:+ ,@objective-terms))
               `(,@constraints
                 (lp:binary ,@ (hash-table-values class-vars))
                 (lp:binary ,@ (hash-table-values enode-vars))))))
-           (selections (make-hash-table)))
+          (selections (make-hash-table)))
       (maphash
        (lambda (enode var)
          (when (plusp (lp:solution-variable solution var))
            (setf (gethash (enode-find enode) selections) enode)))
-       enode-vars))))
+       enode-vars)
+      (values selections (lp:solution-objective-value solution)))))
 
 (defun lp-extract (enode weight-analysis)
-  "Extract a term for ENODE from `*egraph*' using ILP.
+  "Extract a term for ENODE from `*egraph*' using ILP. Return the extracted term
+and its cost.
 
 WEIGHT-ANALYSIS should compute the weight of each enode. Note that different
 from `greedy-extract', the cost model is implicitly additive."
-  (build-term enode (lp-select enode weight-analysis)))
+  (multiple-value-bind (selection cost) (lp-select enode weight-analysis)
+    (values (build-term enode selection) cost)))

@@ -28,8 +28,8 @@ Iteration 0/11 found 9 (+ (- X) (+ (- Y) (+ Y 0)))
 Iteration 0/13 found 7 (+ (+ (- Y) Y) (- X))
 Iteration 0/14 found 4 (+ 0 (- X))
 Iteration 0/16 found 2 (- X)
-2                               ; three return values, first the best cost
-(- X)                           ; then the best term
+(- X)                           ; three return values, first the best term
+2                               ; then the best cost
 (:N-ACCEPTED 17 :N-RESTART 1)   ; finally additional information
 #+END_SRC
 
@@ -53,4 +53,5 @@ Rebuilding... Done. 491 enodes, 57 eclasses
 Iteration 8: Applying rules... Rebuilding... Done. 491 enodes, 57 eclasses
 Iteration 9: Applying rules... Rebuilding... Done. 491 enodes, 57 eclasses
 (- X)
+2
 #+END_SRC

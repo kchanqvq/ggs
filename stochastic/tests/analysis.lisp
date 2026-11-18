@@ -92,7 +92,7 @@ the variables of LHS, as a rule's weight computes it."
 
 (defun node-analysis (term analysis)
   "ANALYSIS of TERM as the search reports it."
-  (nth-value 0 (search* term 'no-rules analysis)))
+  (nth-value 1 (search* term 'no-rules analysis)))
 
 (defun check-templates (name rules analysis)
   (let ((rule-set (probe-rule-set (symbolicate name '- analysis '-probes) rules analysis)))

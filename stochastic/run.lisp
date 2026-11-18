@@ -358,7 +358,7 @@ PROXY-COST and ANALYSES (unevaluated)."
                       (format t "~&Iteration ~a/~a restart ~a ~a~%"
                               seed-1 i cost (node-term node offset)))
                     (return)))))))))
-    (values best-cost best-term
+    (values best-term best-cost
             `( :n-accepted ,n-accepted :n-restart ,n-restart
                ,@(when save-cost-history
                    `(:cost-history ,(nreverse cost-history)))
@@ -380,8 +380,8 @@ PROXY-COST and ANALYSES (unevaluated)."
     (nreverse st)))
 
 (defun reduce-stochastic-result (results-1 results-2)
-  (bind (((bc1 bt1 plist1) results-1)
-         ((bc2 bt2 plist2) results-2)
+  (bind (((bt1 bc1 plist1) results-1)
+         ((bt2 bc2 plist2) results-2)
          ((:plist (na1 :n-accepted)
                   (nr1 :n-restart)
                   (st1 :cost-history 'unbound)
@@ -392,7 +392,7 @@ PROXY-COST and ANALYSES (unevaluated)."
                   (st2 :cost-history 'unbound)
                   (fh2 :full-history 'unbound))
           plist2))
-    `(,@(if (< bc1 bc2) (list bc1 bt1) (list bc2 bt2))
+    `(,@(if (< bc1 bc2) (list bt1 bc1) (list bt2 bc2))
       ( :n-accepted ,(+ na1 na2) :n-restart ,(+ nr1 nr2)
         ,@(unless (eq st1 'unbound)
             `(:cost-history ,(merge-cost-history st1 st2)))
@@ -422,7 +422,7 @@ PROXY-COST and ANALYSES (unevaluated)."
 COST and PROXY-COST (default COST) name DEFINE-ANALYSIS analyses whose values
 are costs: define them with :MERGE #'MIN, :BOTTOM +INF-COST+ and :TYPE
 COST. PROXY-COST is used to compute probabilities.  ANALYSES names further
-analyses the rules use.  Return the best cost, the best term and a plist of
+analyses the rules use.  Return the best term, the best cost and a plist of
 statistics.
 
 Budget parameters TARGET-COST, MAX-TIME and MAX-RESTART controls when the
@@ -481,7 +481,7 @@ MAX-RESTART=64."
            (unwind-protect
                 (values-list (reduce #'reduce-stochastic-result threads :key #'bt:join-thread))
              (setf (car finish-flag) t))))
-        ((= nproc 0) (values +inf-cost+ term (list :n-accepted 0 :n-restart 0)))
+        ((= nproc 0) (values term +inf-cost+ (list :n-accepted 0 :n-restart 0)))
         (t (apply #'stochastic-search-1
                   term rule-set cost
                   (remove-from-plist args :nproc :workers)))))
