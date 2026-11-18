@@ -15,97 +15,54 @@
 
 (in-package :ggs/util)
 
-(defmacro do-variadic-slots ((slot-var offset variadic-structure &optional result) &body body)
-  (destructuring-bind (slot-var &optional index-var) (ensure-list slot-var)
-    (once-only (variadic-structure)
-      (with-gensyms (i)
-        `(loop for ,i of-type fixnum
-               from ,offset below (length (the simple-vector ,variadic-structure))
-               ,@(when index-var `(for ,index-var of-type fixnum from 0))
-               do (let ((,slot-var (svref ,variadic-structure ,i)))
-                    ,@body)
-               finally (return ,result))))))
+(defmacro define-variadic-structure (name-and-options &body slot-description)
+  "Like (DEFSTRUCT NAME-AND-OPTIONS SLOT-DESCRIPTION...), but the last slot is
+*variadic*. The defined structures contain an arbitrary number (specified and
+fixed when each structure is constructed) of variadic slot values. The syntax
+for the last SLOT-DESCRIPTION is \((SINGULAR-NAME PLURAL-NAME) [INITFORM
+OPTION...]), or \(SINGULAR-NAME [INITFORM OPTION...]), in which case PLURAL-NAME
+defaults to SINGULAR-NAME with an S appended. If the struct name is S, the
+variadic slot singular name is V, and plural name is VS, the following are
+defined:
 
-(declaim (inline n-variadic-slots map-variadic-slots))
-(defun n-variadic-slots (offset variadic-structure)
-  (- (length (the simple-vector variadic-structure)) offset))
+\(DO-S-VS (ARG-VAR STRUCT [RESULT]) BODY...): evaluate BODY with each successive
+variadic slot value in STRUCT bound to ARG-VAR, and return RESULT.
 
-(defun map-variadic-slots (function offset variadic-structure)
-  (with-collector (collect)
-    (do-variadic-slots (arg offset variadic-structure)
-      (collect (funcall function arg)))))
+\(S-N-VS STRUCT): return the number of variadic slots in STRUCT.
 
-(defmacro get-variadic-slot (i offset variadic-structure)
-  `(svref ,variadic-structure (+ ,i ,offset)))
+\(MAP-S-VS FN STRUCT): call FN with each successive variadic slot value in
+STRUCT and return its results as a list.
 
-(declaim (inline variadic-slots-between variadic-slot-from-end))
-(defun variadic-slot-from-end (from-end node)
-  "Variadic slot FROM-END of NODE counting from the end (0 is the last)."
-  (svref node (- (length node) (1+ from-end))))
+\(S-V I STRUCT): get the I-th variadic slot value in STRUCT. SETF-able.
 
-(defun variadic-slots-between (from-start from-end offset node)
-  "Variadic slots of NODE from FROM-START to FROM-END."
-  (loop for i from (+ offset from-start) to (- (length node) (1+ from-end))
-        collect (svref node i)))
++S-VS-OFFSET+: a constant number that locate the variadic slots in defined
+structures. See below.
 
-(defun list-form-items (form)
-  "Normalize mix of `append', `list' and `list*' into a list of (LIST SINGLE-ITEM)
-or MULTIPLE-ITEM."
-  (typecase form
-    (null '())
-    ((cons (eql list)) (mapcar (lambda (f) `(list ,f)) (cdr form)))
-    ((cons (eql list*)) (append (list-form-items `(list ,@(butlast (cdr form))))
-                                (list-form-items (lastcar (cdr form)))))
-    ((cons (eql append)) (mappend #'list-form-items (cdr form)))
-    (t (list form))))
+Supports :INCLUDE, child structures inherits all slots *except* the variadic
+slot. To access variadic slot generically, caller need to know the exact
+structure type at runtime, and pass in the corresponding offset (+S-VS-OFFSET+)
+using GET-VARIADIC-SLOT and alike.
 
-(defun single-item-p (item)
-  (and (consp item) (eq (car item) 'list)))
+The constructor (MAKE-S) additionally take the following keyword arguments:
 
-(defun expand-make (args fixed offset)
-  (let* ((items (list-form-items args))
-         (vars (make-gensym-list (length items))))
-    (if (not (and (every #'single-item-p items) (integerp offset)))
-        `(let* (,@(mapcar (lambda (item var)
-                            `(,var ,(if (single-item-p item) (second item) item)))
-                          items vars)
-                (new (make-array
-                      (+ (+ ,offset ,(count-if #'single-item-p items))
-                         ,@(mappend (lambda (item var)
-                                      (unless (single-item-p item) `((length ,var))))
-                                    items vars))))
-                (i ,offset))
-           (declare (fixnum i))
-           (setf ,@(loop for f in fixed
-                         for k from 0
-                         append `((svref new ,k) ,f)))
-           ,@(mappend (lambda (item var)
-                        (if (single-item-p item)
-                            `((setf (svref new i) ,var)
-                              (incf i))
-                            `((dolist (x ,var)
-                                (setf (svref new i) x)
-                                (incf i)))))
-                      items vars)
-           new)
-        `(vector ,@fixed ,@(make-list (- offset (length fixed)) :initial-element 0)
-                 ,@(mapcar #'second items)))))
+OFFSET: override the variadic slot offset. Useful for using constructor for a
+parent structure to make a child structure at runtime.
 
-(defmacro define-variadic-structure (name-and-options &body slot-and-options)
-  "Supports :INCLUDE, child structures inherits all slots *except* the variadic
-slot. To access variadic slot generically, caller need to know the exact structure
-type at runtime, and pass in the corresponding offset using GET-VARIADIC-SLOT and
-alike"
+N-ARGS: specify the number of variadic slots. Cannot be used together with ARGS.
+
+ARGS: specify the list of initial value for variadic slots. A compiler macro is
+defined to optimize any nested mix of `append', `list' and `list*' that appears
+as ARGS into non-consing code. Cannot be used together with N-ARGS."
   (bind (((name . options) (ensure-list name-and-options))
-         (doc (and (stringp (car slot-and-options)) (pop slot-and-options)))
-         (slot-and-options (mapcar #'ensure-list slot-and-options))
+         (doc (and (stringp (car slot-description)) (pop slot-description)))
+         (slot-description (mapcar #'ensure-list slot-description))
          (include (cadr (assoc :include options)))
-         (own-slots (mapcar #'ensure-list (butlast slot-and-options)))
+         (own-slots (mapcar #'ensure-list (butlast slot-description)))
          (ordinary-slots (append (when include
                                    (or (get include 'variadic-structure-slots)
                                        (error "~S is not a variadic structure." include)))
                                  own-slots))
-         (last-slot (lastcar slot-and-options))
+         (last-slot (lastcar slot-description))
          (singular (if (listp (car last-slot))
                        (caar last-slot)
                        (car last-slot)))
@@ -172,6 +129,95 @@ alike"
        (defun ,n-args (,name) (n-variadic-slots ,offset-const ,name))
        (defmacro ,get-arg (i ,name)
          `(get-variadic-slot ,i ,',offset-const ,,name)))))
+
+(defmacro do-variadic-slots ((slot-var offset variadic-structure &optional result) &body body)
+  "Evaluate BODY with each successive variadic slot value in VARIADIC-STRUCTURE
+bound to SLOT-VAR, and return RESULT. OFFSET must be a number that locates the
+variadic slots for the exact type of VARIADIC-STRUCTURE."
+  (destructuring-bind (slot-var &optional index-var) (ensure-list slot-var)
+    (once-only (variadic-structure)
+      (with-gensyms (i)
+        `(loop for ,i of-type fixnum
+               from ,offset below (length (the simple-vector ,variadic-structure))
+               ,@(when index-var `(for ,index-var of-type fixnum from 0))
+               do (let ((,slot-var (svref ,variadic-structure ,i)))
+                    ,@body)
+               finally (return ,result))))))
+
+(declaim (inline n-variadic-slots map-variadic-slots))
+(defun n-variadic-slots (offset variadic-structure)
+  "Return the number of variadic slots in VARIADIC-STRUCTURE. OFFSET must be a
+number that locates the variadic slots for the exact type of VARIADIC-STRUCTURE."
+  (- (length (the simple-vector variadic-structure)) offset))
+
+(defun map-variadic-slots (function offset variadic-structure)
+  "Call FN with each successive variadic slot value in VARIADIC-STRUCTURE and
+return its results as a list. OFFSET must be a number that locates the variadic
+slots for the exact type of VARIADIC-STRUCTURE."
+  (with-collector (collect)
+    (do-variadic-slots (arg offset variadic-structure)
+      (collect (funcall function arg)))))
+
+(defmacro get-variadic-slot (i offset variadic-structure)
+  "Get the I-th variadic slot value in VARIADIC-STRUCTURE. SETF-able. OFFSET must
+be a number that locates the variadic slots for the exact type of VARIADIC-STRUCTURE."
+  `(svref ,variadic-structure (+ ,i ,offset)))
+
+(declaim (inline variadic-slots-between variadic-slot-from-end))
+(defun variadic-slot-from-end (from-end variadic-structure)
+  "Get the FROM-END-th variadic slot value in VARIADIC-STRUCTURE counting from the
+end (0 is the last)."
+  (svref variadic-structure (- (length variadic-structure) (1+ from-end))))
+
+(defun variadic-slots-between (from-start from-end offset variadic-structure)
+  "Get the variadic slot values in VARIADIC-STRUCTURE from FROM-START to
+FROM-END (0 is the last) as a list. OFFSET must be a number that locates the
+variadic slots for the exact type of VARIADIC-STRUCTURE."
+  (loop for i from (+ offset from-start) to (- (length variadic-structure) (1+ from-end))
+        collect (svref variadic-structure i)))
+
+(defun list-form-items (form)
+  "Normalize mix of `append', `list' and `list*' into a list of (LIST SINGLE-ITEM)
+or MULTIPLE-ITEM."
+  (typecase form
+    (null '())
+    ((cons (eql list)) (mapcar (lambda (f) `(list ,f)) (cdr form)))
+    ((cons (eql list*)) (append (list-form-items `(list ,@(butlast (cdr form))))
+                                (list-form-items (lastcar (cdr form)))))
+    ((cons (eql append)) (mappend #'list-form-items (cdr form)))
+    (t (list form))))
+
+(defun single-item-p (item)
+  (and (consp item) (eq (car item) 'list)))
+
+(defun expand-make (args fixed offset)
+  (let* ((items (list-form-items args))
+         (vars (make-gensym-list (length items))))
+    (if (not (and (every #'single-item-p items) (integerp offset)))
+        `(let* (,@(mapcar (lambda (item var)
+                            `(,var ,(if (single-item-p item) (second item) item)))
+                          items vars)
+                (new (make-array
+                      (+ (+ ,offset ,(count-if #'single-item-p items))
+                         ,@(mappend (lambda (item var)
+                                      (unless (single-item-p item) `((length ,var))))
+                                    items vars))))
+                (i ,offset))
+           (declare (fixnum i))
+           (setf ,@(loop for f in fixed
+                         for k from 0
+                         append `((svref new ,k) ,f)))
+           ,@(mappend (lambda (item var)
+                        (if (single-item-p item)
+                            `((setf (svref new i) ,var)
+                              (incf i))
+                            `((dolist (x ,var)
+                                (setf (svref new i) x)
+                                (incf i)))))
+                      items vars)
+           new)
+        `(vector ,@fixed ,@(make-list (- offset (length fixed)) :initial-element 0)
+                 ,@(mapcar #'second items)))))
 
 (defun var-p (object)
   (and (symbolp object) (string-prefix-p "?" (symbol-name object))))

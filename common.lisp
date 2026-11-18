@@ -62,7 +62,9 @@ MERGE should evaluate to a function that takes two arguments and return their
 lattice merge, and BOTTOM should evaluate to the lattice bottom element.
 
 Each CLAUSE should be of form (PAT BODY...). BODY should evaluates to the
-analysis value for the term matching PAT."
+analysis value for the term matching PAT. It's tolerated for such value to be
+not of TYPE, as long as merging it with a value of TYPE produces a result of
+TYPE."
   `(progn
      (defmacro ,name (term)
        ,(format nil "Return ~A analysis value for TERM.
