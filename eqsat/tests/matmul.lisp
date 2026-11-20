@@ -42,7 +42,7 @@
          (a (term-enode
              (make-matmul-term '(10 14 12 9 13 16 1 6 13 14 7 7 3 14 15 15 19 12 19 8)))))
     (egraph-rebuild)
-    (is (eq :saturate (run-rewrites 'assoc-matmul)))
+    (loop until (run-rewrites 'assoc-matmul))
     (is (= 2619 (enode-analysis-data 'matmul-cost a)))))
 
 ;;; Benchmark
@@ -62,7 +62,7 @@
         (let ((a (term-enode (make-matmul-term (bench-matmul-dims 60)))))
           (egraph-rebuild)
           (benchmark:with-sampling (timer)
-            (run-rewrites '(assoc-matmul -assoc-matmul)))
+            (loop until (run-rewrites '(assoc-matmul -assoc-matmul))))
           (is (= 1849 (egraph-n-eclasses *egraph*)))
           (is (= 36069 (egraph-n-enodes *egraph*)))
           (is (= 30764 (enode-analysis-data 'matmul-cost a))))))
@@ -78,7 +78,7 @@
         (term-enode (make-matmul-term (bench-matmul-dims 80)))
         (egraph-rebuild)
         (benchmark:with-sampling (timer)
-          (is (eq :saturate (run-rewrites '(assoc-matmul -assoc-matmul)))))
+          (loop until (run-rewrites '(assoc-matmul -assoc-matmul))))
         (is (= 3258 (egraph-n-eclasses *egraph*)))
         (is (= 85418 (egraph-n-enodes *egraph*)))))
     (benchmark:report timer)))

@@ -66,73 +66,71 @@
                    (get-rules rule-set)))))
     (process name)))
 
-(defun run-rewrites (rule-sets &key max-iter max-time check verbose
-                                 initial-match-limit
-                                 (initial-ban-length 5)
-                                 prune-constant)
-  "Run RULE-SETS repeatly on `*egraph*' until some stop criterion.
+(defstruct (backoff-state
+            (:constructor make-backoff-state (&key (initial-match-limit 1000)
+                                                (initial-ban-length 5))))
+  "Can be passed as `:backoff-state' argument to `run-rewrites' to schedule rules
+in the style of egg's BackoffScheduler. INITIAL-MATCH-LIMIT and
+INITIAL-BAN-LENGTH can either be numbers that specify the respective values for
+all rules, or alists of form ((RULE . VALUE) ...) that provide rule-specific
+configurations. If RULE names a rule set, VALUE applies to each individual rule
+included in that rule set. Explicit NIL VALUE disables backoff scheduling for
+applicable rules. If RULE is T, VALUE specifies the default value for all
+rules. When multiple configuration values are applicable for a rule, the most
+specific one takes precedence. INITIAL-BAN-LENGTH defaults to 5 when no value is
+specified and INITIAL-MATCH-LIMIT defaults to 1000 when no value is specified."
+  (ban-until-table (make-hash-table))
+  (ban-times-table (make-hash-table))
+  initial-match-limit initial-ban-length)
 
-RULE-SETS can be a symbol naming a single rule set, or a list of such symbols.
-
-Returns the reason for termination: one of :max-iter, :max-time, :saturate.
-
-If INITIAL-MATCH-LIMIT is non-nil, schedule rules in the style of egg's
-BackoffScheduler. INITIAL-MATCH-LIMIT and INITIAL-BAN-LENGTH can either be
-numbers that specify the respective values for all rules, or alists of
-form ((RULE . VALUE) ...) that provide rule-specific configurations. If RULE
-names a rule set, VALUE applies to each individual rule included in that rule
-set. If RULE is T, VALUE specifies the default value for all rules. When
-multiple configuration values is applicable for a rule, the most specific one
-takes precedence. INITIAL-BAN-LENGTH defaults to 5 when no value is specified.
+(defun run-rewrites (rule-sets &key verbose prune-constant backoff-state)
+  "Run RULE-SETS on `*egraph*' for one iteration. RULE-SETS can be a symbol naming
+a single rule set, or a list of such symbols. Return T if running RULE-SETS with
+the same options repeatedly will no longer change `*egraph*', i.e. `*egraph*' is
+saturated. PRUNE-CONSTANT can be nil or a predicate, such that if some constant
+satisfies it, all other enodes within the same eclass are deleted. BACKOFF-STATE
+can be nil or an object made by `make-backoff-state' which enables scheduling in
+the style of egg's BackoffScheduler.
 
 Note: this function does not call `egraph-rebuild' upfront. Particularly, if you
 have added some terms to EGRAPH, you MUST call `egraph-rebuild' before calling
 this function."
-  (let ((n-enodes (egraph-n-enodes *egraph*))
-        (n-eclasses (egraph-n-eclasses *egraph*))
-        (n-iter 0)
-        (ban-until-table (make-hash-table))
-        (ban-times-table (make-hash-table))
-        (start-time (get-internal-real-time))
-        (rules (mappend #'compiled-rules (ensure-list rule-sets))))
-    (loop
-      (when (and max-iter (>= n-iter max-iter))
-        (return :max-iter))
-      (when (and max-time (>= (/ (- (get-internal-real-time) start-time)
-                                 internal-time-units-per-second)
-                              max-time))
-        (return :max-time))
-      (when verbose (format t "Iteration ~d: " n-iter))
-      (when verbose (format t "Applying rules... "))
-      (unwind-protect
-           (loop for (rule . included-names) in rules do
-             (let* ((ban-until (gethash rule ban-until-table))
-                    (ban-times (gethash rule ban-times-table 0))
-                    (initial-match-limit (alist-like-get included-names initial-match-limit))
-                    (initial-ban-length (alist-like-get included-names initial-ban-length 5))
-                    ;; FIXME: will we ever want match-limit greater than
-                    ;; `most-positive-fixnum'?
-                    (match-limit (and initial-match-limit
-                                      (min (ash initial-match-limit ban-times)
-                                           most-positive-fixnum))))
-               (unless (and ban-until (< n-iter ban-until))
-                 (remhash rule ban-until-table)
-                 (handler-case (funcall rule :match-limit match-limit)
-                   (match-limit-exceeded (c)
-                     (when verbose (format t "~&~a~%" c))
-                     (setf (gethash rule ban-until-table)
-                           (+ n-iter (ash initial-ban-length ban-times)))
-                     (incf (gethash rule ban-times-table 0)))))))
-        (when verbose (format t "Rebuilding... "))
-        (egraph-rebuild :prune-constant prune-constant))
-      (when check (check-egraph))
-      (incf n-iter)
-      (let ((n-enodes-1 (egraph-n-enodes *egraph*))
-            (n-eclasses-1 (egraph-n-eclasses *egraph*)))
-        (when verbose
-          (format t "Done. ~a enodes, ~a eclasses~%" n-enodes-1 n-eclasses-1))
-        (cond ((not (and (= n-enodes n-enodes-1) (= n-eclasses n-eclasses-1)))
-               (setq n-enodes n-enodes-1 n-eclasses n-eclasses-1))
-              ;; Some rules are still banned, skip till they reactivate
-              ((plusp (hash-table-count ban-until-table)))
-              (t (return :saturate)))))))
+  (bind ((n-enodes (egraph-n-enodes *egraph*))
+         (n-eclasses (egraph-n-eclasses *egraph*))
+         (rules (mappend #'compiled-rules (ensure-list rule-sets))))
+    (when verbose (format t "Applying rules... "))
+    (unwind-protect
+         (loop for (rule . included-names) in rules do
+           (cond (backoff-state
+                  (bind (((:struct backoff-state- ban-until-table ban-times-table
+                                   initial-match-limit initial-ban-length)
+                          backoff-state)
+                         (ban-until (gethash rule ban-until-table))
+                         (ban-times (gethash rule ban-times-table 0))
+                         (initial-match-limit (alist-like-get included-names initial-match-limit 1000))
+                         (initial-ban-length (alist-like-get included-names initial-ban-length 5))
+                         ;; FIXME: will we ever want match-limit greater than
+                         ;; `most-positive-fixnum'?
+                         (match-limit (and initial-match-limit initial-ban-length
+                                           (min (ash initial-match-limit ban-times)
+                                                most-positive-fixnum))))
+                    (cond ((not ban-until)
+                           (handler-case (funcall rule :match-limit match-limit)
+                             (match-limit-exceeded (c)
+                               (when verbose (format t "~&~a~%" c))
+                               (setf (gethash rule ban-until-table)
+                                     (1- (ash initial-ban-length ban-times)))
+                               (incf (gethash rule ban-times-table 0)))))
+                          ((> ban-until 1) (decf (gethash rule ban-until-table)))
+                          (ban-until (remhash rule ban-until-table)))))
+                 (t (funcall rule))))
+      (when verbose (format t "Rebuilding... "))
+      (egraph-rebuild :prune-constant prune-constant))
+    (let ((n-enodes-1 (egraph-n-enodes *egraph*))
+          (n-eclasses-1 (egraph-n-eclasses *egraph*)))
+      (when verbose
+        (format t "Done. ~a enodes, ~a eclasses~%" n-enodes-1 n-eclasses-1))
+      (and (= n-enodes n-enodes-1) (= n-eclasses n-eclasses-1)
+           ;; If some rules are still banned, continue till they reactivate
+           (or (not backoff-state)
+               (zerop (hash-table-count (backoff-state-ban-until-table backoff-state))))))))

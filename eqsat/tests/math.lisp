@@ -115,7 +115,8 @@
      (let* ((*egraph* (make-egraph))
             (lhs (term-enode ',lhs)))
        (egraph-rebuild)
-       (run-rewrites 'math-all :max-iter 10 :initial-match-limit 1000 :prune-constant #'numberp)
+       (loop with backoff-state = (make-backoff-state) repeat 10
+             until (run-rewrites 'math-all :prune-constant #'numberp :backoff-state backoff-state))
        ;; enodes are cyclic (:type vector) structs; bound printing so a failing
        ;; IS doesn't overflow the stack rendering the enode (see diff-power-harder).
        (let ((*print-circle* t) (*print-level* 6) (*print-length* 12))
@@ -137,7 +138,8 @@
          (a (term-enode '(d x (- (pow x 3) (* 7 (pow x 2))))))
          (b (term-enode '(* x (- (* 3 x) 14)))))
     (egraph-rebuild)
-    (run-rewrites 'math-all :max-iter 10 :initial-match-limit 1000 :prune-constant #'numberp)
+    (loop with backoff-state = (make-backoff-state) repeat 10
+          until (run-rewrites 'math-all :prune-constant #'numberp :backoff-state backoff-state))
     (let ((*print-circle* t) (*print-level* 6) (*print-length* 12))
       (is (eq (enode-find b) (enode-find a))))))
 
@@ -150,7 +152,7 @@
         (term-enode '(d x (- (pow x 3) (* 7 (pow x 2)))))
         (egraph-rebuild)
         (benchmark:with-sampling (timer)
-          (run-rewrites 'math-all :max-iter 15 :prune-constant #'numberp))))
+          (loop repeat 15 until (run-rewrites 'math-all :prune-constant #'numberp)))))
     (benchmark:report timer)))
 
 (def-math-test math.integral-part.1 ()
@@ -169,7 +171,8 @@
   (let* ((*egraph* (make-egraph :analyses 'ast-size-no-d-or-i))
          (a (term-enode '(pow (+ x (+ x x)) (+ x x)))))
     (egraph-rebuild)
-    (run-rewrites 'math-all :max-iter 10 :initial-match-limit 1000 :prune-constant #'numberp)
+    (loop with backoff-state = (make-backoff-state) repeat 10
+          until (run-rewrites 'math-all :prune-constant #'numberp :backoff-state backoff-state))
     (is (member (greedy-extract a 'ast-size-no-d-or-i)
                 '((pow (* 3 x) (+ x x))
                   (pow (* x 3) (+ x x))

@@ -101,9 +101,9 @@
          (a (term-enode '(* 0 42)))
          (b (term-enode 0)))
     (egraph-rebuild)
-    (is (eq :saturate
-            (run-rewrites '(commute-add commute-mul add-0 mul-0 mul-1)
-                          :check t :max-iter 10)))
+    (is (loop repeat 10
+              thereis (run-rewrites '(commute-add commute-mul add-0 mul-0 mul-1))
+              do (check-egraph)))
     (is (eq (enode-find a) (enode-find b)))
     (is (equal 0 (greedy-extract a 'ast-size)))))
 
@@ -112,9 +112,9 @@
          (a (term-enode '(+ 0 (* 1 foo))))
          (b (term-enode 'foo)))
     (egraph-rebuild)
-    (is (eq :saturate
-            (run-rewrites '(commute-add commute-mul add-0 mul-0 mul-1)
-                          :check t :max-iter 10)))
+    (is (loop repeat 10
+              thereis (run-rewrites '(commute-add commute-mul add-0 mul-0 mul-1))
+              do (check-egraph)))
     (is (eq (enode-find a) (enode-find b)))
     (is (equal 'foo (greedy-extract a 'ast-size)))))
 
@@ -125,9 +125,7 @@
   (let ((*egraph* (make-egraph)))
     (term-enode '(+ 0 (+ 1 (+ 2 (+ 3 (+ 4 (+ 5 (+ 6 7))))))))
     (egraph-rebuild)
-    (is (eq :saturate
-            (run-rewrites '(commute-add assoc-add)
-                          :check t :max-iter 10)))
+    (is (loop repeat 10 thereis (run-rewrites '(commute-add assoc-add)) do (check-egraph)))
     (is (= 6058 (egraph-n-enodes *egraph*)))
     (is (= 255 (egraph-n-eclasses *egraph*)))))
 
@@ -141,10 +139,10 @@
          (b (term-enode '(- (+ a a) (* 2 a))))
          (c (term-enode '(+ a (- b (* 1 b))))))
     (egraph-rebuild)
-    (is (eq :saturate
-            (run-rewrites '(sub-cancel add-2
-                            commute-add commute-mul add-0 mul-0 mul-1)
-                          :check t :max-iter 10)))
+    (is (loop repeat 10
+                thereis (run-rewrites '(sub-cancel add-2
+                                        commute-add commute-mul add-0 mul-0 mul-1))
+              do (check-egraph)))
     (is (equal 0 (greedy-extract a 'ast-size)))
     (is (equal 0 (greedy-extract b 'ast-size)))
     (is (equal 'a (greedy-extract c 'ast-size)))))
@@ -155,10 +153,10 @@
          (b (term-enode '(/ 3 5)))
          (c (term-enode '(/ 5 5))))
     (egraph-rebuild)
-    (is (eq :saturate
-            (run-rewrites '(sub-cancel div-cancel
-                            commute-add commute-mul add-0 mul-0 mul-1)
-                          :check t :max-iter 10)))
+    (is (loop repeat 10
+                thereis (run-rewrites '(sub-cancel div-cancel
+                                        commute-add commute-mul add-0 mul-0 mul-1))
+              do (check-egraph)))
     (is (equal '(/ 0 0) (greedy-extract a 'ast-size)))
     (is (equal '(/ 3 5) (greedy-extract b 'ast-size)))
     (is (equal 1 (greedy-extract c 'ast-size)))))
@@ -174,10 +172,9 @@
          (c (term-enode '(d a (d a (sin a)))))
          (c-1 (term-enode '(* -1 (sin a)))))
     (egraph-rebuild)
-    (is (eq :saturate
-            (run-rewrites '(d-sin d-cos
-                            commute-add commute-mul add-0 mul-0 mul-1)
-                          :check t :max-iter 10)))
+    (is (loop repeat 10
+                thereis (run-rewrites '(d-sin d-cos commute-add commute-mul add-0 mul-0 mul-1))
+              do (check-egraph)))
     (is (equal '(cos a) (greedy-extract a 'ast-size)))
     (is (eq (enode-find b-1) (enode-find b)))
     (is (eq (enode-find c-1) (enode-find c)))))
@@ -189,8 +186,7 @@
          (a (term-enode 'a))
          (b (term-enode '(+ (+ (+ a 0) 0) 0))))
     (egraph-rebuild)
-    (is (eq :saturate
-            (run-rewrites '-add-0 :check t :max-iter 10)))
+    (is (loop repeat 10 thereis (run-rewrites '-add-0) do (check-egraph)))
     (is (eq (enode-find a) (enode-find b)))))
 
 (defrw* const-fold
@@ -209,9 +205,10 @@
          (b (term-enode '(+ a 5)))
          (c (term-enode '(+ 2 (* 3 5)))))
     (egraph-rebuild)
-    (is (eq :saturate
-            (run-rewrites '(commute-add commute-mul assoc-add assoc-mul const-fold)
-                          :prune-constant #'numberp :check t :max-iter 10)))
+    (is (loop repeat 10
+                thereis (run-rewrites '(commute-add commute-mul assoc-add assoc-mul const-fold)
+                                      :prune-constant #'numberp)
+              do (check-egraph)))
     (is (eq (enode-find a) (enode-find b)))
     (is (equal 17 (greedy-extract c 'ast-size)))))
 
@@ -224,7 +221,7 @@
   (let* ((*egraph* (make-egraph))
          (a (term-enode '(+ (d x (+ 1 2)) (d y y)))))
     (egraph-rebuild)
-    (run-rewrites '(commute-add assoc-add d-var d-const const-fold) :max-iter 10)
+    (loop repeat 10 until (run-rewrites '(commute-add assoc-add d-var d-const const-fold)))
     (is (eq (enode-find (term-enode 1)) (enode-find a)))))
 
 (defrw seq-swap (f ?a ??x ?b) (f ?b ??x ?a))
@@ -235,7 +232,7 @@
          (b (term-enode '(f 1 2)))
          (c (term-enode '(f 1))))
     (egraph-rebuild)
-    (is (eq :saturate (run-rewrites 'seq-swap :check t :max-iter 10)))
+    (is (loop repeat 10 thereis (run-rewrites 'seq-swap) do (check-egraph)))
     (is (eq (enode-find a) (enode-find (term-enode '(f 4 2 3 1)))))
     ;; ??X matches no argument
     (is (eq (enode-find b) (enode-find (term-enode '(f 2 1)))))
@@ -249,7 +246,7 @@
          (a (term-enode '(f 1 2 3)))
          (b (term-enode '(f 1))))
     (egraph-rebuild)
-    (is (eq :saturate (run-rewrites 'seq-rotate :check t :max-iter 10)))
+    (is (loop repeat 10 thereis (run-rewrites 'seq-rotate) do (check-egraph)))
     (is (eq (enode-find a) (enode-find (term-enode '(g 3 1 2)))))
     (is (eq (enode-find b) (enode-find (term-enode '(g 1)))))))
 
@@ -260,7 +257,7 @@
          (a (term-enode '(h x y)))
          (b (term-enode '(k (h x y) 0)))
          (n-enodes (progn (egraph-rebuild) (egraph-n-enodes *egraph*))))
-    (is (eq :saturate (run-rewrites 'seq-wrap :check t :max-iter 10)))
+    (is (loop repeat 10 thereis (run-rewrites 'seq-wrap) do (check-egraph)))
     (is (eq (enode-find a) (enode-find b)))
     ;; The RHS is hash-consed to the existing enodes
     (is (= n-enodes (egraph-n-enodes *egraph*)))))
@@ -275,7 +272,7 @@
          (prefix-1 (term-enode '(p (f a b) (f a b c))))
          (prefix-2 (term-enode '(p (f a b c) (f a b)))))
     (egraph-rebuild)
-    (is (eq :saturate (run-rewrites 'seq-same :check t :max-iter 10)))
+    (is (loop repeat 10 thereis (run-rewrites 'seq-same) do (check-egraph)))
     (is (eq (enode-find yes) (enode-find same)))
     (is (not (eq (enode-find yes) (enode-find differ))))
     (is (not (eq (enode-find yes) (enode-find prefix-1))))
@@ -288,7 +285,7 @@
          (a (term-enode '(q (h 1 2))))
          (b (term-enode '(q (j)))))
     (egraph-rebuild)
-    (is (eq :saturate (run-rewrites 'seq-fsym :check t :max-iter 10)))
+    (is (loop repeat 10 thereis (run-rewrites 'seq-fsym) do (check-egraph)))
     (is (eq (enode-find a) (enode-find (term-enode '(r (h 1 2))))))
     (is (eq (enode-find b) (enode-find (term-enode '(r j)))))))
 
@@ -329,7 +326,7 @@
       ;; Fused into `%intern-merge-enode' by the compiler macro
       (signals unbound-variable (enode-merge a (make-enode 'f b)))
       (signals unbound-variable (egraph-rebuild))
-      (signals unbound-variable (run-rewrites 'add-0 :max-iter 1)))))
+      (signals unbound-variable (run-rewrites 'add-0)))))
 
 (def-test type-check-egraph ()
   (signals type-error (let ((*egraph* *not-an-enode*)) (make-enode 'a))))
@@ -373,7 +370,7 @@
         (term-enode '(/ 1 (- (/ (+ 1 (sqrt five)) 2) (/ (- 1 (sqrt five)) 2))))
         (egraph-rebuild)
         (benchmark:with-sampling (timer)
-          (run-rewrites 'math-all :max-iter 11))
+          (loop repeat 11 until (run-rewrites 'math-all)))
         (is (= 443792 (egraph-n-eclasses *egraph*)))
         (is (= 1047556 (egraph-n-enodes *egraph*)))))
     (benchmark:report timer)))
@@ -387,7 +384,7 @@
         (term-enode '(+ 0 (+ 1 (+ 2 (+ 3 (+ 4 (+ 5 (+ 6 (+ 7 (+ x (+ y (+ z w))))))))))))
         (egraph-rebuild)
         (benchmark:with-sampling (timer)
-          (run-rewrites '(commute-add assoc-add)))
+          (loop until (run-rewrites '(commute-add assoc-add))))
         (is (= 479 (egraph-n-eclasses *egraph*)))
         (is (= 39088 (egraph-n-enodes *egraph*)))))
     (benchmark:report timer)))

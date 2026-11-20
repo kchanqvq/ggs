@@ -9,7 +9,7 @@
            #:enode-representative-p #:enode-canonical-p #:enode-eclass-info
            #:*egraph* #:enode-find #:enode-merge #:egraph-rebuild #:check-egraph
            #:egraph-n-enodes #:egraph-n-eclasses #:enode-analysis-data
-           #:precompile-eqsat-rule-set #:term-enode #:run-rewrites
+           #:precompile-eqsat-rule-set #:term-enode #:run-rewrites #:make-backoff-state
            #:build-term #:greedy-select #:greedy-extract #:lp-select #:lp-extract))
 
 (serapeum:eval-always
