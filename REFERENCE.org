@@ -1,0 +1,104 @@
+* Terms
+GGS performs rewrite over /terms/, modelled after ground terms in first-order logic. A term consists of a /fsym/ (which can be any Lisp datum), and some number of /arguments/ (which are also terms). Terms can be denoted by S-exprs with the following syntax:
+#+BEGIN_SRC
+  term ::= (fsym term*) | fsym
+#+END_SRC
+=fsym= is syntactic sugar for =(fsym)=, a term with no arguments, which we call a /constant term/. We call a term with one or more arguments a /compound term/. For example, =(1)= or equivalently =1= denotes a constant term; =(+ (1) (* (1) (2)))= or equivalently =(+ 1 (* 1 2))= denotes a compound term.
+
+While terms are generally inputted or outputted using the S-expr notation, they are represented differently internally -- users should not operate on such internal representations in any way other than passing them back to GGS. On the other hand, =fsym= can store an arbitrary Lisp datum and is intended for passing user-defined data. See [[Patterns]].
+
+* Patterns
+A /pattern/ is like a term containing some variables. A pattern can match against a /subject term/, and when successful, produce appropriate variable bindings; or it can be used to construct a term once all variables are bound. The latter use is sometimes called a /template/ in other systems and may use a different syntax, but in GGS matching and constructing terms use the same pattern syntax, as follows:
+#+BEGIN_SRC
+  pattern ::= (fsym-pattern argument-pattern*) | fsym | ?var
+  fsym-pattern ::= fsym | ?var
+  argument-pattern ::= pattern | ??seq-var
+#+END_SRC
+
+=?var=, or a variable, is any symbol whose name starts with a single =?=, such as =?a=, =?x=, =?y=, =?term=; =??seq-var=, or a sequence variable, is any symbol whose name starts with double =?=, such as =??x=, =??args=.
+
+A pattern can be =(fsym-pattern argument-pattern*)= which matches the subject term's fsym against =fsym-pattern= and arguments against =argument-pattern*=. A pattern can also be any Lisp datum =fsym= other than a variable, which is syntatic sugar for =(fsym)= --  it matches a constant term =eql= to =fsym=. Finally, a pattern can be a variable =?var= which matches any subject term and binds it to =?var=.  The binding of =?var= is an internal term representation and should not be operated on in any way other than passing back to GGS.
+
+A =fsym-pattern= can be a variable =?var=, which matches any fsym and binds it to =?var=. A =fsym-pattern= can also be any Lisp datum =fsym= other than a variable, which only matches an fsym =eql= to =fsym=. The binding of =?var= is exactly the Lisp datum specified as fsym when constructing the subject term.
+
+A =argument-pattern= can be a =pattern=, which matches a single argument term against =pattern=. A =argument-pattern= can also be a sequence variable =??seq-var=, which matches any number of argument terms and binds them to =??seq-var= as a proper list of internal term representations. Currently, at most one sequence variable can be used in the argument part of =(fsym-pattern argument-pattern*)=.
+
+A variable or sequence variable may appear more than once in a pattern, which is then called a /nonlinear/ variable or sequence variable -- the pattern matchs only if all occurrences of it match the same term or sequence of terms.
+
+For example:
+- =?x= matches any subject term and binds its internal term representation to =?x=
+- =(?x)= matches a constant term and binds its fsym (specified by the user when constructing the term) to =?x=
+- =(0)= or equivalently =0= matches a constant term whose fsym is =eql= to 0
+- =(+ (0) ?x)= or equivalently =(+ 0 ?x)= matches a compound term whose fsym is =eql= to =+=, first argument term is a constant term whose fsym is =eql= to 0, and binds the internal term representation of its second argument to =?x=.
+- =(?f ??args 0)= matches any compound term whose last argument is a constant term whose fsym is =eql= to 0. =?f= is bound to its fsym and =??args= is bound to a proper list of internal term representations of its other-than-last arguments.
+- =(list ??x 0 ??y)= is currently not supported because two sequence variables =??x= and =??y= appear as argument patterns.
+- =(- ?x ?x)= matches a compound term whose fsym is =eql= to =-=, and whose two arguments are the same term.
+- Similarly, =(diff (set ??xs) (set ??xs))= matches only if the arguments of the two =set= terms are exactly the same sequences.
+
+All of the above can also be used to construct terms when the variables are bound, for example:
+- if =?x= is bound to an internal term representation (established by matching against some pattern), the pattern =?x= passes that term back to GGS.
+- =(?x)= constructs a constant term whose fsym is =?x=, which can be any Lisp datum bound by the user.
+- If =?f= is bound to an arbitrary Lisp datum by the user, and =??args= is bound to a proper list of internal term representations, =(?f ??args 0)= constructs a compound term with corresponding fsym and arguments, with a constant term whose fsym is =0= appended as the last argument.
+* Rule sets
+Rewrite /rule sets/ are specified with =(defrw* rule-set-name clause*)=, or =(defrw rule-set-name . clause)= which is a syntactic sugar for a single-rule rule set =(defrw* name clause)=. The syntax of clause is as follows:
+#+BEGIN_SRC
+  clause ::= (lhs rhs [:guard condition]) | (lhs :eval body*) | include-rule-set-name
+  lhs ::= pattern
+  rhs ::= pattern
+#+END_SRC
+
+=(lhs rhs [:guard condition])= matches =lhs= and rewrites it to =rhs=, when =condition= (defaults to =t=), a Lisp expression, evaluates to true. The variable bindings established by =lhs= are visible to =rhs= and =condition=. =(lhs rhs [:guard condition])= is a syntactic sugar for =(lhs :eval (when condition (yield-rewrite rhs)))=.
+
+=(lhs :eval body*)= matches a subject term against =lhs=, then evaluates =body*=, a list of Lisp expressions, with the variable bindings established by =lhs=. Inside =body*=, =(yield-rewrite rhs)= can be used to report that the subject term can be rewritten to =rhs=.
+
+A clause can also be a symbol =include-rule-set-name=, which should name another rule set defined by =defrw*= or =defrw=. This declares =include-rule-set-name= to be included in the rule set being defined.
+
+Following is an example using =:eval= clauses and =yield-rewrite=:
+#+BEGIN_SRC lisp
+  (defrw* const-fold
+    ((+ (?a) (?b)) :eval
+     (when (and (numberp ?a) (numberp ?b))
+       (let ((?n (+ ?a ?b)))
+         (yield-rewrite (?n)))))
+    ((* (?a) (?b)) :eval
+     (when (and (numberp ?a) (numberp ?b))
+       (let ((?n (* ?a ?b)))
+         (yield-rewrite (?n)))))
+    ((- (?a) (?b)) :eval
+     (when (and (numberp ?a) (numberp ?b))
+       (let ((?n (- ?a ?b)))
+         (yield-rewrite (?n)))))
+    ((/ (?a) (?b)) :eval
+     (when (and (numberp ?a) (numberp ?b) (not (= ?b 0)))
+       (let ((?n (/ ?a ?b)))
+         (yield-rewrite (?n))))))
+#+END_SRC
+
+* Analyses
+An /analysis/ is a compositional function of terms, whose values can be used in rule definitions and as cost functions. Analyses are defined with the syntax =(define-analysis (analysis-name &key merge bottom type) analysis-clause*)=, where:
+#+BEGIN_SRC
+  analysis-clause ::= (pattern body*)
+#+END_SRC
+
+=merge= should evaluate to a function of two arguments that returns their lattice join, and =bottom= should evaluate to the bottom element of that lattice. =type= (default =t=) is an unevaluated type specifier for analysis values.
+
+=body*= is a list of Lisp expressions evaluated with the variable bindings established by =pattern=; the value of its last expression is a /proposed analysis value/ of the matched term. Multiple proposed analysis values provided for a term are combined with =merge= to compute its /actual/ analysis value; a term matched by no clause has actual analysis value =bottom=. Currently, =type= only specify the type of actual analysis values; it's tolerated for proposed analysis values to be not of =type=, as long as merging it with a value of =type= produces an actual analysis value of =type=.
+
+Once an analysis with name =analysis-name= is defined, =(analysis-name term)= can be used in rule or analysis definitions to retrieve its value for the internal term representation =term=.
+
+  For example, the following defines the size of a term as a cost:
+  #+BEGIN_SRC lisp
+    (define-analysis (ast-size :merge #'min :bottom +inf-cost+ :type cost)
+      ((?f ?x ?y) (+ 1 (ast-size ?x) (ast-size ?y)))
+      ((?f ?x) (+ 1 (ast-size ?x)))                       
+      ((?f) 1))
+  #+END_SRC
+
+  while the constant =+inf-cost+= and the type =cost= are defined (exported by =ggs/common=) as
+
+#+BEGIN_SRC lisp
+  (defconstant +inf-cost+ (expt 10 10))
+  (deftype cost () `(integer 0 ,+inf-cost+))
+#+END_SRC
+
+  Note that the intermediate proposed analysis values such as =(+ 1 (ast-size ?x) (ast-size ?y))= may exceed the range of =cost=, but merging with bottom =+inf-cost+= via =#'min= bring the resulting value back into the range of =cost=.

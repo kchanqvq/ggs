@@ -1,13 +1,18 @@
 ;;;; Pattern matching compiler
 ;;;
 ;;; `do-match*' compiles multiple (PAT BODY...) clauses into a single decision
-;;; tree. This is used for both matching all rules in a rule-set simultaneously,
-;;; and for compiling analyses. For the analyses use case, the compiler also
-;;; partial evaluates over partially static subject. Therefore, analysis values
-;;; (especially cost analysis) over (TERM TMPL) can be computed without
-;;; materializing the term.
+;;; tree. This is used for matching LHS of all rules in a rule-set
+;;; simultaneously.
 ;;;
-;;; `do-match*' itself handles renaming non-linear variables in lhs patterns and
+;;; Since analyses use the same pattern language as rewrite rules, `do-match*'
+;;; is also used for compiling analyses. Moreover, we often want to compute
+;;; analysis value (such as cost) for RHS of rewrite rules, whose overall shapes
+;;; are known at compile time. Therefore, we make `do-match*' a partial
+;;; evaluator that understands partially static subjects of the form (TERM
+;;; TMPL). This enables us to generate code that compute analysis values of
+;;; rewrite rule RHS directly without materializing them.
+;;;
+;;; `do-match*' itself handles renaming non-linear variables in LHS patterns and
 ;;; renaming variables in partially static subject, then outsource to
 ;;; `%do-match*'. `%do-match*' decompose the matching task recursively:
 ;;; `%do-match-1' handle one level of fsym and arity matching, remaining levels

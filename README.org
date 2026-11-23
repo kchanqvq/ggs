@@ -1,4 +1,5 @@
 #+TITLE: GGS: Rewrite-based Optimizations
+For detailed reference of the rule and analysis sub languages, see [[./REFERENCE.org]].
 * Example
 Define a simple problem:
 #+BEGIN_SRC lisp

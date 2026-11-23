@@ -85,7 +85,7 @@ evaluate CONT-EXPR."
       cont-expr))
 
 (defun expand-template (tmpl)
-  "Generate code that creates an enode according to TMPL (rhs of rewrite rule)."
+  "Generate code that creates an enode according to TMPL (RHS of rewrite rule)."
   (labels ((process (tmpl)
              (cond ((consp tmpl)
                     `(make-enode-from-args

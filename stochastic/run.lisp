@@ -1,4 +1,127 @@
+;;; Stochastic Term Rewriting sampler
+
 (in-package :ggs/stochastic)
+
+(defun stochastic-search
+    (term rule-set cost &rest args
+     &key (seed 0) (stride 1)
+       (beta 2.0) (soft-walk 0) (soft-stall nil) (hard-walk soft-walk) (max-stall 16000)
+       (target-cost 0 target-cost-p) (max-time nil max-time-p) (max-restart 64 max-restart-p)
+       (proxy-cost cost) analyses
+       verbose save-cost-history save-full-history
+       (nproc 1) workers)
+  "Search for a term equivalent to TERM under RULE-SET that minimises COST.
+
+COST and PROXY-COST (default COST) name DEFINE-ANALYSIS analyses whose values
+are costs: define them with :MERGE #'MIN, :BOTTOM +INF-COST+ and :TYPE
+COST. PROXY-COST is used to compute probabilities.  ANALYSES names further
+analyses the rules use.  Return the best term, the best cost and a plist of
+statistics.
+
+Budget parameters TARGET-COST, MAX-TIME and MAX-RESTART controls when the
+overall search process stops. If none of these is provided, we default to
+MAX-RESTART=64."
+  (declare (ignore beta soft-stall hard-walk max-stall
+                   target-cost max-time max-restart
+                   verbose save-cost-history save-full-history))
+
+  ;; If user sets any budget parameter, don't set MAX-RESTART=64.
+  (unless max-restart-p
+    (when (or target-cost-p max-time-p)
+      (setf (getf args :max-restart) nil)))
+
+  (cond (workers
+         (let ((n-workers (length workers)))
+           (multiple-value-bind (nproc rem) (floor nproc n-workers)
+             (loop for proc in workers
+                   for i from 0
+                   for nproc-1 = (if (< i rem) (1+ nproc) nproc)
+                   do (with-standard-io-syntax
+                        (write `(apply #'stochastic-search
+                                       ',term ',rule-set ',cost
+                                       :seed ',(+ seed (* i stride))
+                                       :stride ',(* n-workers stride)
+                                       :nproc ',nproc-1
+                                       ',(remove-from-plist args :workers :nproc :seed :stride))
+                               :stream (uiop:process-info-input proc))
+                        (terpri (uiop:process-info-input proc))
+                        (finish-output (uiop:process-info-input proc)))))
+           (values-list
+            (reduce #'reduce-stochastic-result workers :key
+                    (lambda (proc)
+                      (let ((result (with-standard-io-syntax
+                                      (read (uiop:process-info-output proc)))))
+                        (ecase (car result)
+                          (:result (cdr result))
+                          (:error (error "Error in worker: ~a" (cadr result))))))))))
+        ((> nproc 1)
+         ;; Compile rule sets in main thread only
+         (compiled-rule-set rule-set cost proxy-cost
+                            (analyses-alist cost proxy-cost analyses))
+         (let* ((finish-flag (list nil))
+                (threads (mapcar
+                          (lambda (i)
+                            (bt:make-thread
+                             (lambda ()
+                               (multiple-value-list
+                                (apply #'stochastic-search-1 term rule-set cost
+                                       :seed (+ seed (* i stride))
+                                       :stride (* nproc stride)
+                                       :finish-flag finish-flag
+                                       (remove-from-plist args :workers :nproc :seed :stride))))
+                             :name (format nil "search worker ~a" i)))
+                          (iota nproc))))
+           (unwind-protect
+                (values-list (reduce #'reduce-stochastic-result threads :key #'bt:join-thread))
+             (setf (car finish-flag) t))))
+        ((= nproc 0) (values term +inf-cost+ (list :n-accepted 0 :n-restart 0)))
+        (t (apply #'stochastic-search-1
+                  term rule-set cost
+                  (remove-from-plist args :nproc :workers)))))
+
+(defun merge-cost-history (st1 st2)
+  "Merge two time-ordered (TIME COST) lists, keeping only strict improvements."
+  (let ((st '())
+        (best-cost +inf-cost+))
+    (loop
+      (when (or (not st1) (and st2 (>= (caar st1) (caar st2))))
+        (rotatef st1 st2))
+      (when (not st1) (return))
+      (when (< (cadar st1) best-cost)
+        (setq best-cost (cadar st1))
+        (push (car st1) st))
+      (pop st1))
+    (nreverse st)))
+
+(defun reduce-stochastic-result (results-1 results-2)
+  (bind (((bt1 bc1 plist1) results-1)
+         ((bt2 bc2 plist2) results-2)
+         ((:plist (na1 :n-accepted)
+                  (nr1 :n-restart)
+                  (st1 :cost-history 'unbound)
+                  (fh1 :full-history 'unbound))
+          plist1)
+         ((:plist (na2 :n-accepted)
+                  (nr2 :n-restart)
+                  (st2 :cost-history 'unbound)
+                  (fh2 :full-history 'unbound))
+          plist2))
+    `(,@(if (< bc1 bc2) (list bt1 bc1) (list bt2 bc2))
+      ( :n-accepted ,(+ na1 na2) :n-restart ,(+ nr1 nr2)
+        ,@(unless (eq st1 'unbound)
+            `(:cost-history ,(merge-cost-history st1 st2)))
+        ,@(unless (eq fh1 'unbound)
+            `(:full-history ,(sort (nconc fh1 fh2) #'< :key (lambda (h) (getf h :seed)))))))))
+
+(defun worker-loop ()
+  (with-standard-io-syntax
+    (loop
+      (handler-case
+          (prin1 (cons :result (multiple-value-list (eval (read)))))
+        (serious-condition (c)
+          (prin1 (cons :error (princ-to-string c)))))
+      (terpri)
+      (finish-output))))
 
 (declaim (inline fastlog2 fastexp2))
 (eval-always
@@ -14,6 +137,7 @@
 (defun constant-for-fastexp2 (base)
   (values (floor (* (expt 2 23) (log base 2)))))
 (defun fastexp2 (p base-constant)
+  "(FASTEXP2 P (CONSTANT-FOR-FASTEXP2 BASE)) computes (EXPT BASE P) approximately."
   (declare (optimize speed (safety 0))
            (fixnum p base-constant))
   ;; P is a difference of costs, so |P| <= +INF-COST+, and STOCHASTIC-SEARCH-1
@@ -25,14 +149,145 @@
                (+ (the fixnum (* p base-constant))
                   (- (ash 127 23) 366393))))))
 
+(defvar-unbound *last-fired-ruleset* "Recorded for :SAVE-FULL-HISTORY.")
+
+(defun stochastic-search-1
+    (init-term rule-set cost
+     &key (finish-flag (list nil)) (seed 0) (stride 1)
+       (beta 2.0) (soft-walk 0) (soft-stall nil) (hard-walk soft-walk) (max-stall 16000)
+       (target-cost 0) max-time (max-restart 64)
+       (proxy-cost cost) analyses
+       verbose save-cost-history save-full-history)
+  "The actual work of stochastic search, in a single thread."
+  (declare ((or null integer) soft-stall max-stall max-restart)
+           (integer hard-walk soft-walk)
+           (single-float beta))
+  (bind ((analyses-alist (analyses-alist cost proxy-cost analyses))
+         (offset (+ +rose-node-args-offset+ (length analyses-alist)))
+         ((finalize-node sample-inf-temp sample-fin-temp get-cost)
+          (mapcar (curry #'getf (compiled-rule-set rule-set cost proxy-cost analyses-alist))
+                  '(finalize-node sample-inf-temp sample-fin-temp get-cost)))
+         (start-time (get-internal-real-time))
+         (end-time (and max-time
+                        (+ start-time
+                           (* max-time internal-time-units-per-second))))
+         (beta-constant (constant-for-fastexp2 (exp (/ beta 2))))
+         (*last-fired-ruleset* nil)
+         (init-node (progn
+                      (unless (<= (* +inf-cost+ beta-constant) most-positive-fixnum)
+                        (error "BETA ~A is too large." beta))
+                      (term-node init-term offset finalize-node beta-constant)))
+         (init-cost (funcall get-cost init-node))
+         (best-term (node-term init-node offset))
+         (best-cost init-cost)
+         (n-accepted 0)
+         (n-restart 0)
+         (cost-history '())
+         (full-history '()))
+    (declare (function get-cost))
+
+    (float-features:with-float-traps-masked t
+      ;; Outer loop: restart with different seeds
+      (block solve
+        (loop for seed-1 from seed by stride do
+          ;; Inner loop: one run of stochastic search
+          (let* ((*random-state* (sb-ext:seed-random-state seed-1))
+                 (node init-node)
+                 (best-cost-1 init-cost)
+                 (n-stall 0)
+                 (best-cost-soft init-cost)
+                 (n-stall-soft 0)
+                 (n-walk hard-walk))
+            (declare (integer n-accepted n-restart n-stall n-stall-soft n-walk))
+            (when (and max-restart (>= seed-1 (+ seed max-restart)))
+              (return))
+            (when save-full-history
+              (push (nreverse (list :seed seed-1 (list :term init-term :cost init-cost)))
+                    full-history))
+            (incf n-restart)
+            (loop for i of-type fixnum from 0 do
+              (progn
+                (when (or (car finish-flag)
+                          ;; Check time every 1024 iters, because
+                          ;; GET-INTERNAL-REAL-TIME is slow
+                          (and end-time
+                               (zerop (mod i 1024))
+                               (>= (get-internal-real-time) end-time)))
+                  (return-from solve))
+
+                ;; FIXME: a constant top-level NODE might still be rewritable,
+                ;; although this probably is not usually useful.
+                (when (or (not (rose-node-p node))
+                          (zerop (rose-node-n-rewrites node)))
+                  (return-from solve))
+
+                (cond ((plusp n-walk)
+                       (decf n-walk)
+                       (setq node
+                             (search-rewrite-n-rewrites
+                              node offset (random (rose-node-n-rewrites node))
+                              sample-inf-temp finalize-node beta-constant)))
+                      (t
+                       (setq node
+                             (search-rewrite-weight
+                              node offset (random (rose-node-weight node))
+                              sample-fin-temp finalize-node beta-constant))))
+
+                (incf n-accepted)
+                (let ((cost (funcall get-cost node)))
+                  (when save-full-history
+                    (push (list :term (node-term node offset)
+                                :cost cost
+                                :ruleset *last-fired-ruleset*)
+                          (car full-history)))
+                  ;; Check for cost function decrease
+                  (if (< cost best-cost-1)
+                      (progn
+                        (when verbose
+                          (format t "~&Iteration ~a/~a found ~a ~a~%"
+                                  seed-1 i cost (node-term node offset)))
+                        (setq best-cost-1 cost
+                              n-stall 0)
+                        (when (< cost best-cost)
+                          (setq best-cost cost
+                                best-term (node-term node offset))
+                          (when save-cost-history
+                            (push (list (- (get-internal-real-time) start-time) cost)
+                                  cost-history))
+                          (when (<= cost target-cost)
+                            (setf (car finish-flag) t)
+                            (return-from solve))))
+                      (incf n-stall))
+
+                  ;; inf-temp walk (soft restart) bookkeeping
+                  (if (or (plusp n-walk) (< cost best-cost-soft))
+                      (setq best-cost-soft cost
+                            n-stall-soft 0)
+                      (incf n-stall-soft))
+                  (when (and soft-stall (>= n-stall-soft soft-stall))
+                    (setq n-walk soft-walk
+                          n-stall-soft 0))
+
+                  ;; Check for restart
+                  (unless (and (or (not max-stall) (< n-stall max-stall))
+                               (< cost +inf-cost+))
+                    (when verbose
+                      (format t "~&Iteration ~a/~a restart ~a ~a~%"
+                              seed-1 i cost (node-term node offset)))
+                    (return)))))))))
+    (values best-term best-cost
+            `( :n-accepted ,n-accepted :n-restart ,n-restart
+               ,@(when save-cost-history
+                   `(:cost-history ,(nreverse cost-history)))
+               ,@(when save-full-history
+                   `(:full-history ,(nreverse (mapcar #'nreverse full-history))))))))
+
 (defun analyses-alist (cost proxy-cost analyses)
   (mapcar (lambda (a) (cons a (get-analysis a)))
           (remove-duplicates (list* proxy-cost cost analyses) :from-end t)))
 
-(defvar-unbound *last-fired-ruleset*
-  "Recorded for :SAVE-FULL-HISTORY.")
-
 (defun expand-template (tmpl offset)
+  "Generate code that creates a rose node according to TMPL (RHS of rewrite rule)."
   (labels ((process (tmpl)
              (cond
                ((consp tmpl)
@@ -234,254 +489,3 @@ PROXY-COST and ANALYSES (unevaluated)."
                                             rules cost proxy-cost analyses-alist user-decls))
                         (collect key)
                         (collect (compile nil lambda)))))))
-
-(defun stochastic-search-1
-    (init-term rule-set cost
-     &key (finish-flag (list nil)) (seed 0) (stride 1)
-       (beta 2.0) (soft-walk 0) (soft-stall nil) (hard-walk soft-walk) (max-stall 16000)
-       (target-cost 0) max-time (max-restart 64)
-       (proxy-cost cost) analyses
-       verbose save-cost-history save-full-history)
-  (declare ((or null integer) soft-stall max-stall max-restart)
-           (integer hard-walk soft-walk)
-           (single-float beta))
-  (bind ((analyses-alist (analyses-alist cost proxy-cost analyses))
-         (offset (+ +rose-node-args-offset+ (length analyses-alist)))
-         ((finalize-node sample-inf-temp sample-fin-temp get-cost)
-          (mapcar (curry #'getf (compiled-rule-set rule-set cost proxy-cost analyses-alist))
-                  '(finalize-node sample-inf-temp sample-fin-temp get-cost)))
-         (start-time (get-internal-real-time))
-         (end-time (and max-time
-                        (+ start-time
-                           (* max-time internal-time-units-per-second))))
-         (beta-constant (constant-for-fastexp2 (exp (/ beta 2))))
-         (*last-fired-ruleset* nil)
-         (init-node (progn
-                      (unless (<= (* +inf-cost+ beta-constant) most-positive-fixnum)
-                        (error "BETA ~A is too large." beta))
-                      (term-node init-term offset finalize-node beta-constant)))
-         (init-cost (funcall get-cost init-node))
-         (best-term (node-term init-node offset))
-         (best-cost init-cost)
-         (n-accepted 0)
-         (n-restart 0)
-         (cost-history '())
-         (full-history '()))
-    (declare (function get-cost))
-
-    (float-features:with-float-traps-masked t
-      ;; Outer loop: restart with different seeds
-      (block solve
-        (loop for seed-1 from seed by stride do
-          ;; Inner loop: one run of stochastic search
-          (let* ((*random-state* (sb-ext:seed-random-state seed-1))
-                 (node init-node)
-                 (best-cost-1 init-cost)
-                 (n-stall 0)
-                 (best-cost-soft init-cost)
-                 (n-stall-soft 0)
-                 (n-walk hard-walk))
-            (declare (integer n-accepted n-restart n-stall n-stall-soft n-walk))
-            (when (and max-restart (>= seed-1 (+ seed max-restart)))
-              (return))
-            (when save-full-history
-              (push (nreverse (list :seed seed-1 (list :term init-term :cost init-cost)))
-                    full-history))
-            (incf n-restart)
-            (loop for i of-type fixnum from 0 do
-              (progn
-                (when (or (car finish-flag)
-                          ;; Check time every 1024 iters, because
-                          ;; GET-INTERNAL-REAL-TIME is slow
-                          (and end-time
-                               (zerop (mod i 1024))
-                               (>= (get-internal-real-time) end-time)))
-                  (return-from solve))
-
-                ;; FIXME: a constant top-level NODE might still be rewritable,
-                ;; although this probably is not usually useful.
-                (when (or (not (rose-node-p node))
-                          (zerop (rose-node-n-rewrites node)))
-                  (return-from solve))
-
-                (cond ((plusp n-walk)
-                       (decf n-walk)
-                       (setq node
-                             (search-rewrite-n-rewrites
-                              node offset (random (rose-node-n-rewrites node))
-                              sample-inf-temp finalize-node beta-constant)))
-                      (t
-                       (setq node
-                             (search-rewrite-weight
-                              node offset (random (rose-node-weight node))
-                              sample-fin-temp finalize-node beta-constant))))
-
-                (incf n-accepted)
-                (let ((cost (funcall get-cost node)))
-                  (when save-full-history
-                    (push (list :term (node-term node offset)
-                                :cost cost
-                                :ruleset *last-fired-ruleset*)
-                          (car full-history)))
-                  ;; Check for cost function decrease
-                  (if (< cost best-cost-1)
-                      (progn
-                        (when verbose
-                          (format t "~&Iteration ~a/~a found ~a ~a~%"
-                                  seed-1 i cost (node-term node offset)))
-                        (setq best-cost-1 cost
-                              n-stall 0)
-                        (when (< cost best-cost)
-                          (setq best-cost cost
-                                best-term (node-term node offset))
-                          (when save-cost-history
-                            (push (list (- (get-internal-real-time) start-time) cost)
-                                  cost-history))
-                          (when (<= cost target-cost)
-                            (setf (car finish-flag) t)
-                            (return-from solve))))
-                      (incf n-stall))
-
-                  ;; inf-temp walk (soft restart) bookkeeping
-                  (if (or (plusp n-walk) (< cost best-cost-soft))
-                      (setq best-cost-soft cost
-                            n-stall-soft 0)
-                      (incf n-stall-soft))
-                  (when (and soft-stall (>= n-stall-soft soft-stall))
-                    (setq n-walk soft-walk
-                          n-stall-soft 0))
-
-                  ;; Check for restart
-                  (unless (and (or (not max-stall) (< n-stall max-stall))
-                               (< cost +inf-cost+))
-                    (when verbose
-                      (format t "~&Iteration ~a/~a restart ~a ~a~%"
-                              seed-1 i cost (node-term node offset)))
-                    (return)))))))))
-    (values best-term best-cost
-            `( :n-accepted ,n-accepted :n-restart ,n-restart
-               ,@(when save-cost-history
-                   `(:cost-history ,(nreverse cost-history)))
-               ,@(when save-full-history
-                   `(:full-history ,(nreverse (mapcar #'nreverse full-history))))))))
-
-(defun merge-cost-history (st1 st2)
-  "Merge two time-ordered (TIME COST) lists, keeping only strict improvements."
-  (let ((st '())
-        (best-cost +inf-cost+))
-    (loop
-      (when (or (not st1) (and st2 (>= (caar st1) (caar st2))))
-        (rotatef st1 st2))
-      (when (not st1) (return))
-      (when (< (cadar st1) best-cost)
-        (setq best-cost (cadar st1))
-        (push (car st1) st))
-      (pop st1))
-    (nreverse st)))
-
-(defun reduce-stochastic-result (results-1 results-2)
-  (bind (((bt1 bc1 plist1) results-1)
-         ((bt2 bc2 plist2) results-2)
-         ((:plist (na1 :n-accepted)
-                  (nr1 :n-restart)
-                  (st1 :cost-history 'unbound)
-                  (fh1 :full-history 'unbound))
-          plist1)
-         ((:plist (na2 :n-accepted)
-                  (nr2 :n-restart)
-                  (st2 :cost-history 'unbound)
-                  (fh2 :full-history 'unbound))
-          plist2))
-    `(,@(if (< bc1 bc2) (list bt1 bc1) (list bt2 bc2))
-      ( :n-accepted ,(+ na1 na2) :n-restart ,(+ nr1 nr2)
-        ,@(unless (eq st1 'unbound)
-            `(:cost-history ,(merge-cost-history st1 st2)))
-        ,@(unless (eq fh1 'unbound)
-            `(:full-history ,(sort (nconc fh1 fh2) #'< :key (lambda (h) (getf h :seed)))))))))
-
-(defun worker-loop ()
-  (with-standard-io-syntax
-    (loop
-      (handler-case
-          (prin1 (cons :result (multiple-value-list (eval (read)))))
-        (serious-condition (c)
-          (prin1 (cons :error (princ-to-string c)))))
-      (terpri)
-      (finish-output))))
-
-(defun stochastic-search
-    (term rule-set cost &rest args
-     &key (seed 0) (stride 1)
-       (beta 2.0) (soft-walk 0) (soft-stall nil) (hard-walk soft-walk) (max-stall 16000)
-       (target-cost 0 target-cost-p) (max-time nil max-time-p) (max-restart 64 max-restart-p)
-       (proxy-cost cost) analyses
-       verbose save-cost-history save-full-history
-       (nproc 1) workers)
-  "Search for a term equivalent to TERM under RULE-SET that minimises COST.
-
-COST and PROXY-COST (default COST) name DEFINE-ANALYSIS analyses whose values
-are costs: define them with :MERGE #'MIN, :BOTTOM +INF-COST+ and :TYPE
-COST. PROXY-COST is used to compute probabilities.  ANALYSES names further
-analyses the rules use.  Return the best term, the best cost and a plist of
-statistics.
-
-Budget parameters TARGET-COST, MAX-TIME and MAX-RESTART controls when the
-overall search process stops. If none of these is provided, we default to
-MAX-RESTART=64."
-  (declare (ignore beta soft-stall hard-walk max-stall
-                   target-cost max-time max-restart
-                   verbose save-cost-history save-full-history))
-
-  ;; If user sets any budget parameter, don't set MAX-RESTART=64.
-  (unless max-restart-p
-    (when (or target-cost-p max-time-p)
-      (setf (getf args :max-restart) nil)))
-
-  (cond (workers
-         (let ((n-workers (length workers)))
-           (multiple-value-bind (nproc rem) (floor nproc n-workers)
-             (loop for proc in workers
-                   for i from 0
-                   for nproc-1 = (if (< i rem) (1+ nproc) nproc)
-                   do (with-standard-io-syntax
-                        (write `(apply #'stochastic-search
-                                       ',term ',rule-set ',cost
-                                       :seed ',(+ seed (* i stride))
-                                       :stride ',(* n-workers stride)
-                                       :nproc ',nproc-1
-                                       ',(remove-from-plist args :workers :nproc :seed :stride))
-                               :stream (uiop:process-info-input proc))
-                        (terpri (uiop:process-info-input proc))
-                        (finish-output (uiop:process-info-input proc)))))
-           (values-list
-            (reduce #'reduce-stochastic-result workers :key
-                    (lambda (proc)
-                      (let ((result (with-standard-io-syntax
-                                      (read (uiop:process-info-output proc)))))
-                        (ecase (car result)
-                          (:result (cdr result))
-                          (:error (error "Error in worker: ~a" (cadr result))))))))))
-        ((> nproc 1)
-         ;; Compile rule sets in main thread only
-         (compiled-rule-set rule-set cost proxy-cost
-                            (analyses-alist cost proxy-cost analyses))
-         (let* ((finish-flag (list nil))
-                (threads (mapcar
-                          (lambda (i)
-                            (bt:make-thread
-                             (lambda ()
-                               (multiple-value-list
-                                (apply #'stochastic-search-1 term rule-set cost
-                                       :seed (+ seed (* i stride))
-                                       :stride (* nproc stride)
-                                       :finish-flag finish-flag
-                                       (remove-from-plist args :workers :nproc :seed :stride))))
-                             :name (format nil "search worker ~a" i)))
-                                 (iota nproc))))
-           (unwind-protect
-                (values-list (reduce #'reduce-stochastic-result threads :key #'bt:join-thread))
-             (setf (car finish-flag) t))))
-        ((= nproc 0) (values term +inf-cost+ (list :n-accepted 0 :n-restart 0)))
-        (t (apply #'stochastic-search-1
-                  term rule-set cost
-                  (remove-from-plist args :nproc :workers)))))
